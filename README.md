@@ -38,3 +38,23 @@ python -m aic2026.cli embed-keyframes --keyframes-dir data/raw/Keyframes --featu
 python -m aic2026.cli serve ( chạy trên terminal khác )
 streamlit run src/aic2026/app/ui.py
 ```
+## Cây thư mục và dữ liệu cần chép
+
+```text
+new-chat/
+├── src/                         # Chỉ mã nguồn, không chép data vào đây
+├── configs/                     # Cấu hình index, Agent, model
+├── data/
+│   ├── raw/
+│   │   └── Videos/              # Chép video .mp4 chính thức của BTC vào đây
+|   |       keyframes/           # Để keyframes của btc (nếu có) vào đây
+│   ├── downloads/               # Chép 4 ZIP hỗ trợ BTC vào đây
+│   │   ├── clip-features-*.zip
+│   │   ├── map-keyframes-*.zip
+│   │   ├── media-info-*.zip
+│   │   └── objects-*.zip
+│   └── processed/               # Code tự sinh: keyframes, features, manifest
+├── docs/
+├── requirements.txt             # Dùng khi cài bằng pip
+└── pyproject.toml               # Dùng khi cài bằng uv
+```
