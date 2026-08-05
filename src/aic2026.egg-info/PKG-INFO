@@ -1,0 +1,28 @@
+Metadata-Version: 2.4
+Name: aic2026
+Version: 0.1.0
+Summary: Video retrieval, VQA, and temporal alignment starter for AIC 2026
+Requires-Python: >=3.11
+Requires-Dist: numpy>=1.26
+Requires-Dist: pydantic>=2.7
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: typer>=0.12
+Requires-Dist: fastapi>=0.115
+Requires-Dist: uvicorn>=0.30
+Requires-Dist: streamlit>=1.36
+Requires-Dist: httpx>=0.27
+Requires-Dist: rank-bm25>=0.2
+Provides-Extra: retrieval
+Requires-Dist: faiss-cpu>=1.8; extra == "retrieval"
+Provides-Extra: models
+Requires-Dist: torch>=2.3; extra == "models"
+Requires-Dist: open-clip-torch>=2.24; extra == "models"
+Requires-Dist: transformers>=4.44; extra == "models"
+Provides-Extra: video
+Requires-Dist: opencv-python-headless>=4.10; extra == "video"
+Requires-Dist: pillow>=10.0; extra == "video"
+Provides-Extra: agent
+Requires-Dist: langgraph>=1.0; extra == "agent"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.2; extra == "dev"
+Requires-Dist: ruff>=0.6; extra == "dev"

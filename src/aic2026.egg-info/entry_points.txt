@@ -1,0 +1,2 @@
+[console_scripts]
+aic2026 = aic2026.cli:app
