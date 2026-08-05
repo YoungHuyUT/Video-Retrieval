@@ -5,7 +5,10 @@ import json
 from aic2026.models import Candidate, Query
 from aic2026.tasks import default_registry
 
-from .local_llm import LocalLLM
+from .local_llm import (
+    LLMInvocationError,
+    LocalLLM,
+)
 from .prompts import JUDGE_SYSTEM, PLANNER_SYSTEM, task_instruction
 from .tools import RetrievalTools
 from .types import AgentDecision, AgentPlan, AgentResult, AgentTrace
@@ -44,16 +47,36 @@ class RetrievalAgent:
         query: Query,
     ) -> AgentPlan:
         try:
-            return self.llm.structured(
+            plan = self.llm.structured(
                 PLANNER_SYSTEM,
                 query.model_dump_json()
                 + "\n"
                 + task_instruction(query),
                 AgentPlan,
             )
-        except Exception:
+
+            # Explicit TRAKE events provided by the user or competition
+            # are authoritative. The planner may rewrite retrieval queries,
+            # but it must not change the number or order of these events.
+            if query.type == "trake" and query.events:
+                plan = plan.model_copy(
+                    update={
+                        "events": list(query.events),
+                    }
+                )
+
+            return plan
+
+        # The LLM is a pluggable external boundary. Any provider, network,
+        # parsing, or schema failure must degrade to a deterministic plan.
+        except LLMInvocationError:
             return AgentPlan(
                 query_variants=[query.text],
+                events=(
+                    list(query.events)
+                    if query.type == "trake"
+                    else []
+                ),
                 rationale=(
                     "Fallback plan used because the local LLM "
                     "was unavailable or slow."
@@ -81,7 +104,9 @@ class RetrievalAgent:
                 ),
                 AgentDecision,
             )
-        except Exception:
+        # Judgment must fall back deterministically when the external LLM
+        # fails for any provider, network, parsing, or schema-related reason.
+        except LLMInvocationError:
             selected_ids = [
                 item.vector_id
                 for item in ranked
@@ -119,6 +144,25 @@ class RetrievalAgent:
             key=lambda candidate: candidate.score,
             reverse=True,
         )
+    @staticmethod
+    def _resolve_trake_events(
+        query: Query,
+        plan: AgentPlan,
+    ) -> list[str]:
+        """Return the authoritative ordered events for a TRAKE query."""
+
+        events = (
+            list(query.events)
+            if query.events
+            else list(plan.events)
+        )
+
+        if not events:
+            raise ValueError(
+                "TRAKE requires at least one event."
+            )
+
+        return events
 
     def run(
         self,
@@ -239,7 +283,11 @@ class RetrievalAgent:
                         item.answer = answers[item.vector_id]
 
         elif query.type == "trake":
-            events = plan.events or query.events
+            events = self._resolve_trake_events(
+                query=query,
+                plan=plan,
+            )
+
             groups = self.tools.group_by_video(candidates)
 
             aligned: list[Candidate] = []

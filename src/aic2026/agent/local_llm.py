@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Protocol, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -8,34 +7,92 @@ from pydantic import BaseModel, ValidationError
 T = TypeVar("T", bound=BaseModel)
 
 
+class LLMInvocationError(RuntimeError):
+    """Raised when an external LLM call or response cannot be used."""
+
+
 class LocalLLM(Protocol):
-    def structured(self, system: str, user: str, schema: type[T]) -> T: ...
+    def structured(
+        self,
+        system: str,
+        user: str,
+        schema: type[T],
+    ) -> T: ...
 
 
 class OllamaLLM:
-    """Minimal Ollama client; no cloud key and no agent framework lock-in."""
-    def __init__(self, model: str, base_url: str = "http://127.0.0.1:11434", timeout_seconds: float = 45, temperature: float = 0.0):
+    """Minimal Ollama client with normalized integration errors."""
+
+    def __init__(
+        self,
+        model: str,
+        base_url: str = "http://127.0.0.1:11434",
+        timeout_seconds: float = 45,
+        temperature: float = 0.0,
+    ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.temperature = temperature
 
-    def structured(self, system: str, user: str, schema: type[T]) -> T:
+    def structured(
+        self,
+        system: str,
+        user: str,
+        schema: type[T],
+    ) -> T:
         try:
             import httpx
         except ImportError as exc:
-            raise RuntimeError("Install project dependencies with: uv sync") from exc
+            raise LLMInvocationError(
+                "httpx is required to call the local LLM."
+            ) from exc
+
         payload = {
             "model": self.model,
             "stream": False,
             "format": schema.model_json_schema(),
-            "options": {"temperature": self.temperature},
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "options": {
+                "temperature": self.temperature,
+            },
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system,
+                },
+                {
+                    "role": "user",
+                    "content": user,
+                },
+            ],
         }
-        response = httpx.post(f"{self.base_url}/api/chat", json=payload, timeout=self.timeout_seconds)
-        response.raise_for_status()
-        content = response.json()["message"]["content"]
+
+        try:
+            response = httpx.post(
+                f"{self.base_url}/api/chat",
+                json=payload,
+                timeout=self.timeout_seconds,
+            )
+            response.raise_for_status()
+
+            response_payload = response.json()
+            content = response_payload["message"]["content"]
+
+        except httpx.HTTPError as exc:
+            raise LLMInvocationError(
+                "The local LLM request failed."
+            ) from exc
+
+        except (KeyError, TypeError, ValueError) as exc:
+            raise LLMInvocationError(
+                "The local LLM returned an invalid response payload."
+            ) from exc
+
         try:
             return schema.model_validate_json(content)
+
         except ValidationError as exc:
-            raise ValueError(f"Local LLM returned invalid {schema.__name__} JSON") from exc
+            raise LLMInvocationError(
+                f"The local LLM returned invalid "
+                f"{schema.__name__} JSON."
+            ) from exc
