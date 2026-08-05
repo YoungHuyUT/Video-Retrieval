@@ -1,5 +1,9 @@
 # VideoTime-Agent
 
+## 1. Clone repository
+```bash
+git clone https://github.com/YoungHuyUT/VideoTime-Agent.git
+```
 ## Quick Start
 ```bash
 uv sync --extra retrieval --extra agent --extra models --extra video --extra dev
