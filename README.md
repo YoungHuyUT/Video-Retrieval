@@ -4,6 +4,12 @@
 ```bash
 git clone https://github.com/YoungHuyUT/VideoTime-Agent.git
 ```
+## 2. Tạo môi trường ảo:
+```
+python -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+# .venv\Scripts\activate   # Windows
+```
 ## Quick Start
 ```bash
 uv sync --extra retrieval --extra agent --extra models --extra video --extra dev
