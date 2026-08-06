@@ -173,6 +173,46 @@ class RetrievalAgent:
 
         plan = self._plan(query)
 
+        trace = [
+            AgentTrace(
+                step="plan",
+                detail=plan.rationale,
+            )
+        ]
+
+        # TRAKE uses deterministic event-wise retrieval and monotonic DP.
+        # It does not use the generic LLM judge because the judge cannot
+        # reliably select one ordered frame for every event.
+        if query.type == "trake":
+            events = self._resolve_trake_events(
+                query=query,
+                plan=plan,
+            )
+
+            candidates = self.tools.retrieve_trake(
+                events=events,
+                limit=self.answer_limit,
+                prefilter_frames_per_event=(
+                    self.retrieval_pool_size
+                ),
+            )
+
+            trace.append(
+                AgentTrace(
+                    step="trake_align",
+                    detail=(
+                        f"Aligned {len(events)} ordered events "
+                        f"across {len(candidates)} candidate videos."
+                    ),
+                )
+            )
+
+            return AgentResult(
+                candidates=candidates,
+                plan=plan,
+                trace=trace,
+            )
+
         variants = list(
             dict.fromkeys(
                 [
@@ -183,13 +223,6 @@ class RetrievalAgent:
         )[: self.max_tool_rounds]
 
         pool: list[Candidate] = []
-
-        trace = [
-            AgentTrace(
-                step="plan",
-                detail=plan.rationale,
-            )
-        ]
 
         for variant in variants:
             found = self.tools.retrieve(
@@ -281,45 +314,6 @@ class RetrievalAgent:
                 for item in candidates:
                     if item.vector_id is not None:
                         item.answer = answers[item.vector_id]
-
-        elif query.type == "trake":
-            events = self._resolve_trake_events(
-                query=query,
-                plan=plan,
-            )
-
-            groups = self.tools.group_by_video(candidates)
-
-            aligned: list[Candidate] = []
-
-            for group in groups.values():
-                if len(group) < len(events) or not events:
-                    continue
-
-                group = sorted(
-                    group,
-                    key=lambda item: item.score,
-                    reverse=True,
-                )
-
-                representative = group[0].model_copy(
-                    deep=True,
-                )
-
-                representative.event_frames = (
-                    self.tools.temporal_alignment(
-                        candidates=group,
-                        event_count=len(events),
-                    )
-                )
-
-                aligned.append(representative)
-
-            return sorted(
-                aligned,
-                key=lambda item: item.score,
-                reverse=True,
-            )
 
         return default_registry.handler_for(
             query.type

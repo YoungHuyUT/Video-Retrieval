@@ -54,6 +54,35 @@ class FakePipeline:
             ),
         ]
 
+    def retrieve_trake(
+        self,
+        event_embeddings: np.ndarray,
+        top_videos: int,
+        prefilter_frames_per_event: int,
+        penalty_weight: float,
+    ) -> list[Candidate]:
+        assert event_embeddings.shape == (
+            3,
+            1,
+        )
+
+        assert top_videos > 0
+        assert prefilter_frames_per_event > 0
+        assert penalty_weight >= 0
+
+        return [
+            Candidate(
+                video_id="L21_V001",
+                frame_id=200,
+                score=0.92,
+                vector_id=2,
+                event_frames=[
+                    100,
+                    200,
+                    300,
+                ],
+            )
+        ]
 
 class EvidenceSelectingLLM:
     def structured(
@@ -91,10 +120,8 @@ class CollapsingTrakeLLM:
                 rationale="Incorrectly compressed the event sequence.",
             )
 
-        return AgentDecision(
-            action="finish",
-            selected_vector_ids=[1, 2, 3],
-            rationale="Selected one video's evidence.",
+        raise AssertionError(
+            "TRAKE must not call the LLM judge"
         )
 
 

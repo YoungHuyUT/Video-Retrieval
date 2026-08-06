@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -81,6 +82,49 @@ class RetrievalTools:
             text_embedding=embedding,
             top_frames=limit,
             max_answers=limit,
+        )
+
+    def retrieve_trake(
+        self,
+        events: list[str],
+        limit: int,
+        prefilter_frames_per_event: int = 500,
+        penalty_weight: float = 0.005,
+    ) -> list[Candidate]:
+        """Run deterministic event-wise TRAKE retrieval and alignment."""
+
+        cleaned_events = [
+            event.strip()
+            for event in events
+            if event.strip()
+        ]
+
+        if not cleaned_events:
+            raise ValueError(
+                "TRAKE requires at least one non-empty event"
+            )
+
+        if limit <= 0:
+            return []
+
+        event_embeddings = np.stack(
+            [
+                np.asarray(
+                    self.encode_text(event),
+                    dtype=np.float32,
+                ).reshape(-1)
+                for event in cleaned_events
+            ],
+            axis=0,
+        )
+
+        return self.pipeline.retrieve_trake(
+            event_embeddings=event_embeddings,
+            top_videos=limit,
+            prefilter_frames_per_event=(
+                prefilter_frames_per_event
+            ),
+            penalty_weight=penalty_weight,
         )
 
     def candidates_for_video(
