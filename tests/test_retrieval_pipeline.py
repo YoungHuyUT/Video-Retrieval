@@ -170,3 +170,123 @@ def test_tools_use_raw_candidates_for_qa() -> None:
     ]
 
     assert len(first_video_candidates) == 4
+
+def build_trake_pipeline() -> RetrievalPipeline:
+    vectors = np.asarray(
+        [
+            # Correct video: event order 1 -> 2 -> 3.
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            # Wrong video: reversed semantic order.
+            [0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+    manifest = [
+        FrameRecord(
+            vector_id=0,
+            video_id="L01_CORRECT",
+            frame_id=100,
+            keyframe_path="L01_CORRECT/100.jpg",
+        ),
+        FrameRecord(
+            vector_id=1,
+            video_id="L01_CORRECT",
+            frame_id=200,
+            keyframe_path="L01_CORRECT/200.jpg",
+        ),
+        FrameRecord(
+            vector_id=2,
+            video_id="L01_CORRECT",
+            frame_id=300,
+            keyframe_path="L01_CORRECT/300.jpg",
+        ),
+        FrameRecord(
+            vector_id=3,
+            video_id="L02_REVERSED",
+            frame_id=100,
+            keyframe_path="L02_REVERSED/100.jpg",
+        ),
+        FrameRecord(
+            vector_id=4,
+            video_id="L02_REVERSED",
+            frame_id=200,
+            keyframe_path="L02_REVERSED/200.jpg",
+        ),
+        FrameRecord(
+            vector_id=5,
+            video_id="L02_REVERSED",
+            frame_id=300,
+            keyframe_path="L02_REVERSED/300.jpg",
+        ),
+    ]
+
+    return RetrievalPipeline(
+        index=VectorIndex(vectors),
+        manifest=manifest,
+    )
+
+
+def test_trake_ranks_video_with_correct_event_order_first() -> None:
+    pipeline = build_trake_pipeline()
+
+    event_embeddings = np.eye(
+        3,
+        dtype=np.float32,
+    )
+
+    candidates = pipeline.retrieve_trake(
+        event_embeddings=event_embeddings,
+        top_videos=2,
+        prefilter_frames_per_event=6,
+        penalty_weight=0.005,
+    )
+
+    assert len(candidates) == 2
+
+    best = candidates[0]
+
+    assert best.video_id == "L01_CORRECT"
+
+    assert best.event_frames == [
+        100,
+        200,
+        300,
+    ]
+
+    assert len(best.event_frames) == 3
+
+    assert all(
+        previous < current
+        for previous, current in zip(
+            best.event_frames,
+            best.event_frames[1:],
+            strict=False,
+        )
+    )
+
+
+def test_trake_returns_one_candidate_per_video() -> None:
+    pipeline = build_trake_pipeline()
+
+    candidates = pipeline.retrieve_trake(
+        event_embeddings=np.eye(
+            3,
+            dtype=np.float32,
+        ),
+        top_videos=10,
+        prefilter_frames_per_event=6,
+    )
+
+    video_ids = [
+        candidate.video_id
+        for candidate in candidates
+    ]
+
+    assert len(video_ids) == len(
+        set(video_ids)
+    )
