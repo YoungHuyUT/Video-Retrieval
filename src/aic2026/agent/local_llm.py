@@ -27,13 +27,21 @@ class OllamaLLM:
         self,
         model: str,
         base_url: str = "http://127.0.0.1:11434",
-        timeout_seconds: float = 45,
+        timeout_seconds: float = 600,
         temperature: float = 0.0,
+        num_predict: int = 1500,
+        num_ctx: int = 8192,
+        think: bool = False,
+        keep_alive: str = "-1",
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.temperature = temperature
+        self.num_predict = num_predict
+        self.num_ctx = num_ctx
+        self.think = think
+        self.keep_alive = keep_alive
 
     def structured(
         self,
@@ -52,8 +60,12 @@ class OllamaLLM:
             "model": self.model,
             "stream": False,
             "format": schema.model_json_schema(),
+            "think": self.think,
+            "keep_alive": self.keep_alive,
             "options": {
                 "temperature": self.temperature,
+                "num_predict": self.num_predict,
+                "num_ctx": self.num_ctx,
             },
             "messages": [
                 {

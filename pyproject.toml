@@ -16,10 +16,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-retrieval = ["faiss-cpu>=1.8"]
-models = ["torch>=2.3", "open-clip-torch>=2.24", "transformers>=4.44"]
+retrieval = ["faiss-cpu>=1.8", "chromadb>=0.5"]
+models = ["torch>=2.3", "open-clip-torch>=2.24", "transformers>=4.49", "qwen-vl-utils>=0.0.8"]
 video = ["opencv-python-headless>=4.10", "pillow>=10.0"]
-agent = ["langgraph>=1.0"]
+agent = []
 dev = ["pytest>=8.2", "ruff>=0.6"]
 
 [project.scripts]
@@ -41,6 +41,10 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint.per-file-ignores]
+# `typer.Option(...)` in argument defaults is the canonical Typer pattern.
+"src/aic2026/cli.py" = ["B008", "B006"]
 
 [dependency-groups]
 dev = [

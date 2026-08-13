@@ -18,6 +18,7 @@ class FakePipeline:
         text_embedding: np.ndarray,
         top_frames: int,
         max_answers: int,
+        video_ids: set[str] | None = None,
     ) -> list[Candidate]:
         return [
             Candidate(
@@ -60,6 +61,7 @@ class FakePipeline:
         top_videos: int,
         prefilter_frames_per_event: int,
         penalty_weight: float,
+        video_ids: set[str] | None = None,
     ) -> list[Candidate]:
         assert event_embeddings.shape == (
             3,
@@ -83,6 +85,32 @@ class FakePipeline:
                 ],
             )
         ]
+
+    def filter_videos_by_metadata(
+        self,
+        terms: list[str],
+        video_ids: set[str] | None = None,
+    ) -> list[str]:
+        return sorted(video_ids or {"L21_V001"})
+
+    def filter_terms_to_video_ids(
+        self,
+        terms: list[str],
+        video_ids: set[str] | None = None,
+    ) -> set[str] | None:
+        if not terms:
+            return None
+        return set(self.filter_videos_by_metadata(terms, video_ids))
+
+    @staticmethod
+    def _mask_video_ids(
+        candidates: list[Candidate],
+        video_ids: set[str] | None,
+    ) -> list[Candidate]:
+        if not video_ids:
+            return candidates
+        allowed = set(video_ids)
+        return [c for c in candidates if c.video_id in allowed]
 
 class EvidenceSelectingLLM:
     def structured(

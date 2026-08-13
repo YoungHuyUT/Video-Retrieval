@@ -1,4 +1,3 @@
-from .text import HashingTextEmbedder, OpenCLIPTextEmbedder
-from .siglip import SigLIPEncoder
+from .text import OpenCLIPTextEmbedder
 
-__all__ = ["HashingTextEmbedder", "OpenCLIPTextEmbedder", "SigLIPEncoder"]
+__all__ = ["OpenCLIPTextEmbedder"]

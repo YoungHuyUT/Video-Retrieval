@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
-import json
 
 import numpy as np
+
 from aic2026.models import FrameRecord
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -88,7 +91,9 @@ def embed_existing_keyframes(keyframes_root: Path, features_root: Path, encoder:
         selected_dirs = [path for path in sorted(keyframes_root.glob("*")) if path.is_dir()]
 
     for video_dir in selected_dirs:
-        frame_paths = sorted(video_dir.glob("*.jpg"))
+        frame_paths = sorted(
+            [*video_dir.glob("*.jpg"), *video_dir.glob("*.png")]
+        )
         if not frame_paths:
             continue
 
@@ -97,10 +102,13 @@ def embed_existing_keyframes(keyframes_root: Path, features_root: Path, encoder:
         for frame_path in frame_paths:
             try:
                 image = Image.open(frame_path)
-            except Exception:
+                frame_id = int(frame_path.stem)
+            except (ValueError, OSError, TypeError):
+                # Skip files whose name is not a plain frame index (e.g.
+                # "L21_V001_frame001.jpg"); the pipeline only handles numeric ids.
                 continue
             images.append(image.convert("RGB"))
-            frame_ids.append(int(frame_path.stem))
+            frame_ids.append(frame_id)
 
         if not images:
             continue
@@ -198,25 +206,25 @@ def extract_deduplicated_keyframes(
     return ExtractionReport(video_id, decoded, len(retained_ids), output_dir, feature_path)
 
 
-def _resolve_frame_path(keyframes_root: Path, video_id: str, frame_id: int) -> Path:
-    candidates = [
-        keyframes_root / video_id / f"{int(frame_id):09d}.jpg",
-        keyframes_root / video_id / f"{int(frame_id)}.jpg",
-        keyframes_root / video_id / f"{int(frame_id):03d}.jpg",
-        keyframes_root / video_id / f"{int(frame_id):03d}.png",
-        keyframes_root / video_id / f"{int(frame_id):09d}.png",
-        keyframes_root / video_id / f"{int(frame_id)}.png",
-        keyframes_root / video_id.lower() / f"{int(frame_id):09d}.jpg",
-        keyframes_root / video_id.lower() / f"{int(frame_id)}.jpg",
-        keyframes_root / video_id.lower() / f"{int(frame_id):03d}.jpg",
-        keyframes_root / video_id.lower() / f"{int(frame_id):03d}.png",
-        keyframes_root / video_id.lower() / f"{int(frame_id):09d}.png",
-        keyframes_root / video_id.lower() / f"{int(frame_id)}.png",
-    ]
+def _resolve_frame_path(keyframes_root: Path, video_id: str, frame_id: int) -> Path | None:
+    """Resolve a keyframe file allowing any zero-padding width (3-9 digits).
+
+    BTC keyframes may use ``0000.jpg``, ``001.jpg``, or ``000000001.jpg``.
+    Returns the first existing candidate, or ``None`` when nothing matches.
+    """
+    digits = f"{int(frame_id):d}"
+    candidates: list[Path] = []
+    for ext in ("jpg", "png"):
+        for video in (video_id, video_id.lower()):
+            root = keyframes_root / video
+            for width in range(9, 2, -1):
+                if len(digits) <= width:
+                    candidates.append(root / f"{int(frame_id):0{width}d}.{ext}")
+            candidates.append(root / f"{digits}.{ext}")
     for candidate in candidates:
         if candidate.exists():
             return candidate
-    return candidates[0]
+    return None
 
 
 def build_derived_artifacts(keyframes_root: Path, features_root: Path, manifest_path: Path, features_path: Path, video_ids: Iterable[str] | None = None) -> int:
@@ -230,14 +238,27 @@ def build_derived_artifacts(keyframes_root: Path, features_root: Path, manifest_
         video_id = archive_path.stem
         if selected_video_ids and video_id not in selected_video_ids:
             continue
-        archive = np.load(archive_path)
-        frame_ids, features = archive["frame_ids"], archive["features"]
+        # Skip empty/corrupt archives (e.g. a 0-byte leftover from a crashed run).
+        if archive_path.stat().st_size == 0:
+            logger.warning("Skipping empty feature archive %s", archive_path)
+            continue
+        try:
+            archive = np.load(archive_path)
+            frame_ids, features = archive["frame_ids"], archive["features"]
+        except (OSError, EOFError, ValueError):
+            logger.warning("Skipping corrupt feature archive %s", archive_path)
+            continue
         if len(frame_ids) != len(features):
             raise ValueError(f"{archive_path}: frame_ids and features have different sizes")
         for frame_id, feature in zip(frame_ids, features):
             image = _resolve_frame_path(keyframes_root, video_id, int(frame_id))
-            if not image.exists():
-                raise FileNotFoundError(f"Missing retained frame: {image}")
+            if image is None or not image.exists():
+                logger.warning(
+                    "Missing retained frame %s (frame %s); skipping record",
+                    video_id,
+                    int(frame_id),
+                )
+                continue
             records.append(FrameRecord(vector_id=vector_id, clip_feature_index=vector_id, video_id=video_id, frame_id=int(frame_id), keyframe_path=str(image)))
             all_features.append(feature)
             vector_id += 1

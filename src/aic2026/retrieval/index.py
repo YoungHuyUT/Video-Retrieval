@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 import numpy as np
 
 
@@ -11,6 +12,7 @@ class VectorIndex:
         if self.vectors.ndim != 2 or not len(self.vectors):
             raise ValueError("vectors must be a non-empty 2D array")
         self.vectors /= np.maximum(np.linalg.norm(self.vectors, axis=1, keepdims=True), 1e-12)
+        self.manifest_video_ids: list[str] = []
         try:
             import faiss  # type: ignore
             self._faiss = faiss.IndexFlatIP(self.vectors.shape[1])
@@ -19,7 +21,7 @@ class VectorIndex:
             self._faiss = None
 
     @classmethod
-    def from_npy(cls, path: Path) -> "VectorIndex":
+    def from_npy(cls, path: Path) -> VectorIndex:
         return cls(np.load(path))
 
     def search(self, query: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
@@ -36,3 +38,21 @@ class VectorIndex:
         ids = np.argpartition(-scores, k - 1)[:k]
         ids = ids[np.argsort(-scores[ids])]
         return ids, scores[ids]
+
+    def search_filtered(
+        self,
+        query: np.ndarray,
+        k: int,
+        video_ids: set[str] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Vector search restricted to *video_ids* (FAISS/NumPy backend).
+
+        FAISS/NumPy cannot filter on metadata at query time, so we mask the
+        returned candidates by manifest video_id after the nearest-neighbour
+        scan. Pass ``None`` for no filtering.
+        """
+        if not video_ids:
+            return self.search(query, k)
+        ids, scores = self.search(query, k)
+        mask = np.array([vid in video_ids for vid in (self.manifest_video_ids[i] for i in ids)])
+        return ids[mask], scores[mask]

@@ -1,18 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import numpy as np
-
-
-class HashingTextEmbedder:
-    """Offline deterministic fallback; replace with OpenCLIP multilingual encoder in model config."""
-    def __init__(self, dimension: int): self.dimension = dimension
-    def encode(self, text: str) -> np.ndarray:
-        vector = np.zeros(self.dimension, dtype=np.float32)
-        for token in text.lower().split():
-            index = int(hashlib.sha256(token.encode()).hexdigest(), 16) % self.dimension
-            vector[index] += 1
-        return vector
 
 
 class OpenCLIPTextEmbedder:

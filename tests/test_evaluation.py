@@ -1,6 +1,7 @@
 from aic2026.evaluation import evaluate_query
 from aic2026.models import Candidate, GroundTruth, Query
 
+
 def test_kis_and_rank_cutoffs():
     q = Query(query_id="q1", type="kis", text="laptop")
     gt = GroundTruth(video_id="L01_V001", ranges=[(500, 510)])

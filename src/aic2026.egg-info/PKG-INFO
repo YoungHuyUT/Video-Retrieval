@@ -14,15 +14,16 @@ Requires-Dist: httpx>=0.27
 Requires-Dist: rank-bm25>=0.2
 Provides-Extra: retrieval
 Requires-Dist: faiss-cpu>=1.8; extra == "retrieval"
+Requires-Dist: chromadb>=0.5; extra == "retrieval"
 Provides-Extra: models
 Requires-Dist: torch>=2.3; extra == "models"
 Requires-Dist: open-clip-torch>=2.24; extra == "models"
-Requires-Dist: transformers>=4.44; extra == "models"
+Requires-Dist: transformers>=4.49; extra == "models"
+Requires-Dist: qwen-vl-utils>=0.0.8; extra == "models"
 Provides-Extra: video
 Requires-Dist: opencv-python-headless>=4.10; extra == "video"
 Requires-Dist: pillow>=10.0; extra == "video"
 Provides-Extra: agent
-Requires-Dist: langgraph>=1.0; extra == "agent"
 Provides-Extra: dev
 Requires-Dist: pytest>=8.2; extra == "dev"
 Requires-Dist: ruff>=0.6; extra == "dev"

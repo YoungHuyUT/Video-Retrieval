@@ -28,10 +28,18 @@ class RuntimeConfig(BaseModel):
     """Cấu hình nội bộ; UI gửi để backend nạp đúng index/encoder."""
     manifest_path: str = "data/processed/derived_manifest.jsonl"
     features_path: str = "data/processed/derived_features.npy"
-    encoder: str = Field(default="siglip2", pattern="^(clip|siglip2)$")
-    encoder_model: str = "google/siglip2-base-patch16-224"
-    llm_model: str = "qwen3:8b"
+    clip_pretrained: str = "openai"
+    llm_model: str = "qwen3.5:4b"
     ollama_url: str = "http://127.0.0.1:11434"
+    backend: str = "auto"
+    chroma_dir: str = "data/indexes/chroma"
+    metadata_filter: str = ""
+    vlm_backend: str = "ollama"
+    vlm_model: str = "qwen2.5vl:3b"
+    vlm_device: str | None = None
+    vlm_dtype: str = "bfloat16"
+    vlm_timeout: int = 120
+    coarse_top_k: int = 200
 
 
 class TaskRequest(BaseModel):
@@ -43,13 +51,29 @@ class TaskRequest(BaseModel):
 
 
 @lru_cache(maxsize=4)
-def load_orchestrator(manifest_path: str, features_path: str, encoder: str, encoder_model: str, llm_model: str, ollama_url: str):
+def load_orchestrator(
+    manifest_path: str,
+    features_path: str,
+    clip_pretrained: str,
+    llm_model: str,
+    ollama_url: str,
+    backend: str = "auto",
+    chroma_dir: str = "data/indexes/chroma",
+    metadata_filter: str = "",
+    vlm_backend: str = "ollama",
+    vlm_model: str = "qwen2.5vl:3b",
+    vlm_device: str | None = None,
+    vlm_dtype: str = "bfloat16",
+    vlm_timeout: int = 120,
+    coarse_top_k: int = 200,
+):
     """Shared layer: index + encoders load once per runtime configuration."""
     from aic2026.agent import OllamaLLM, RetrievalAgent
     from aic2026.agent.tools import RetrievalTools
-    from aic2026.embeddings import OpenCLIPTextEmbedder, SigLIPEncoder
+    from aic2026.embeddings import OpenCLIPTextEmbedder
     from aic2026.ingestion import load_manifest
-    from aic2026.retrieval import RetrievalPipeline, VectorIndex
+    from aic2026.retrieval import RetrievalPipeline
+    from aic2026.retrieval.factory import load_index_for_query
 
     manifest_file, features_file = Path(manifest_path), Path(features_path)
     missing = [str(path) for path in (manifest_file, features_file) if not path.exists()]
@@ -59,14 +83,49 @@ def load_orchestrator(manifest_path: str, features_path: str, encoder: str, enco
             "(hoặc bỏ --video-id để encode toàn bộ keyframes)."
         )
         raise FileNotFoundError(f"Thiếu index retrieval: {', '.join(missing)}. {hint}")
-    pipeline = RetrievalPipeline(VectorIndex.from_npy(features_file), load_manifest(manifest_file))
-    if encoder == "clip":
-        text_encoder = OpenCLIPTextEmbedder()
-        encode_text = text_encoder.encode
-    else:
-        text_encoder = SigLIPEncoder(encoder_model)
-        encode_text = text_encoder.encode_text
-    return RetrievalAgent(OllamaLLM(model=llm_model, base_url=ollama_url), RetrievalTools(pipeline, encode_text))
+    manifest_records = load_manifest(manifest_file)
+    index = load_index_for_query(
+        features_file,
+        manifest_records,
+        backend=backend,
+        chroma_dir=chroma_dir,
+    )
+    pipeline = RetrievalPipeline(index, manifest_records, frames_per_video=20)
+    text_encoder = OpenCLIPTextEmbedder(pretrained=clip_pretrained)
+    tools = RetrievalTools(pipeline, text_encoder.encode)
+    tools.coarse_top_k = coarse_top_k
+    tools.video_filter_terms = [t.strip() for t in metadata_filter.split(",") if t.strip()] or None
+    # Nối BM25 lexical vào retrieval (text từ Objects/Metadata). tools.retrieve tự
+    # động bỏ qua khi manifest không có text (is_empty), nên an toàn cả khi chưa nạp data.
+    from aic2026.retrieval import BM25Index
+    tools.bm25_index = BM25Index(manifest_records)
+    if vlm_backend != "none" and vlm_model:
+        if vlm_backend == "ollama":
+            from aic2026.qa.vlm_ollama import OllamaVisionModel
+            tools.visual_answerer = OllamaVisionModel(
+                model_name=vlm_model,
+                base_url=ollama_url,
+                timeout_seconds=vlm_timeout,
+            ).answer_question
+        elif vlm_backend == "transformers":
+            from aic2026.qa.vlm import QwenVLM
+            tools.visual_answerer = QwenVLM(
+                model_name=vlm_model,
+                device=vlm_device,
+                torch_dtype=vlm_dtype,
+            ).answer_question
+    agent = RetrievalAgent(
+        tools,
+        llm=OllamaLLM(
+            model=llm_model,
+            base_url=ollama_url,
+            timeout_seconds=600,
+            num_predict=1500,
+            keep_alive="0",
+        ),
+    )
+    agent.coarse_top_k = coarse_top_k
+    return agent
 
 
 def run_task(task_type: str, request: TaskRequest) -> AgentResult:
@@ -76,7 +135,20 @@ def run_task(task_type: str, request: TaskRequest) -> AgentResult:
         raise HTTPException(422, "TRAKE cần events theo đúng thứ tự")
     try:
         config = request.runtime
-        orchestrator = load_orchestrator(config.manifest_path, config.features_path, config.encoder, config.encoder_model, config.llm_model, config.ollama_url)
+        orchestrator = load_orchestrator(
+            config.manifest_path,
+            config.features_path,
+            config.clip_pretrained,
+            config.llm_model,
+            config.ollama_url,
+            backend=config.backend,
+            chroma_dir=config.chroma_dir,
+            vlm_backend=config.vlm_backend,
+            vlm_model=config.vlm_model,
+            vlm_device=config.vlm_device,
+            vlm_dtype=config.vlm_dtype,
+            vlm_timeout=config.vlm_timeout,
+        )
         return orchestrator.run(Query(query_id=request.query_id, type=task_type, text=request.text, question=request.question, events=request.events))
     except HTTPException:
         raise
@@ -97,16 +169,21 @@ def health() -> dict[str, str]:
 def ready(
     manifest_path: str = "data/processed/derived_manifest.jsonl",
     features_path: str = "data/processed/derived_features.npy",
+    chroma_dir: str = "data/indexes/chroma",
 ) -> dict[str, object]:
     """Kiểm tra nhanh trước khi UI gọi agent (tránh chờ load model rồi mới báo thiếu file)."""
+    from aic2026.retrieval import ChromaVectorStore
     manifest_ok = Path(manifest_path).exists()
     features_ok = Path(features_path).exists()
+    chroma_ok = ChromaVectorStore.available() and (Path(chroma_dir) / "chroma.sqlite3").exists()
     return {
         "ready": manifest_ok and features_ok,
         "manifest_path": manifest_path,
         "manifest_exists": manifest_ok,
         "features_path": features_path,
         "features_exists": features_ok,
+        "chroma_dir": chroma_dir,
+        "chroma_ok": chroma_ok,
     }
 
 

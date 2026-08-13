@@ -8,7 +8,6 @@ import numpy as np
 
 from aic2026.models import FrameRecord
 
-
 # ---------------------------------------------------------------------------
 # Tokenizer
 # ---------------------------------------------------------------------------
@@ -50,6 +49,7 @@ class BM25Index:
 
     _bm25: object = field(init=False, repr=False)
     _size: int = field(init=False, repr=False)
+    _empty: bool = field(init=False, repr=False)
 
     def __init__(self, manifest: list[FrameRecord]) -> None:
         try:
@@ -60,9 +60,30 @@ class BM25Index:
             ) from exc
 
         corpus = [_record_tokens(record) for record in manifest]
-        # BM25Okapi handles empty token lists gracefully (scores them 0)
+        # BM25Okapi raises ZeroDivisionError when EVERY document is empty
+        # (no Objects/Metadata text), because self.idf ends up empty. In that
+        # case there is nothing to search lexically: fall back to a degenerate
+        # index that scores every document 0 (survives only via the vector index).
+        if not any(corpus):
+            self._bm25 = None
+            self._size = len(corpus)
+            self._empty = True
+            return
+        # BM25Okapi handles individual empty token lists gracefully (scores them 0)
         self._bm25 = BM25Okapi(corpus)
         self._size = len(corpus)
+        self._empty = False
+
+    @property
+    def is_empty(self) -> bool:
+        """True when no frame has any lexical text (Objects/Metadata empty).
+
+        Callers use this to skip the hybrid/BM25 path entirely when the manifest
+        carries no text — so retrieval falls back to the vector index without the
+        (useless) BM25 round-trip. Once objects/metadata are loaded, this flips to
+        False and lexical retrieval is used automatically.
+        """
+        return self._empty
 
     # ------------------------------------------------------------------
     def search(self, query: str, k: int) -> tuple[np.ndarray, np.ndarray]:
@@ -74,6 +95,10 @@ class BM25Index:
         """
         tokens = _tokenize(query)
         if not tokens or self._size == 0:
+            return np.array([], dtype=np.intp), np.array([], dtype=np.float32)
+
+        # Degenerate index (empty corpus): no lexical evidence, score everything 0.
+        if self._bm25 is None:
             return np.array([], dtype=np.intp), np.array([], dtype=np.float32)
 
         scores: np.ndarray = np.asarray(
@@ -89,6 +114,6 @@ class BM25Index:
         return top_ids, scores[top_ids]
 
     @classmethod
-    def from_manifest(cls, manifest: list[FrameRecord]) -> "BM25Index":
+    def from_manifest(cls, manifest: list[FrameRecord]) -> BM25Index:
         """Convenience constructor; mirrors VectorIndex.from_npy naming style."""
         return cls(manifest)

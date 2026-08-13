@@ -1,0 +1,11 @@
+=== Cosine similarity ===
+mot con trau           | 1.00  0.81  0.78  0.90
+Image of a cow         | 0.81  1.00  0.88  0.77
+a buffalo              | 0.78  0.88  1.00  0.73
+Hinh anh con trau      | 0.90  0.77  0.73  1.00
+
+=== Top-3 video for each query ===
+mot con trau           -> [('L21_V001', 0.258), ('L21_V001', 0.258), ('L21_V001', 0.247)]
+Image of a cow         -> [('L21_V001', 0.275), ('L21_V001', 0.275), ('L21_V001', 0.27)]
+a buffalo              -> [('L21_V001', 0.312), ('L21_V001', 0.291), ('L21_V001', 0.291)]
+Hinh anh con trau      -> [('L21_V001', 0.284), ('L21_V001', 0.279), ('L21_V001', 0.275)]

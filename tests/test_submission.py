@@ -1,6 +1,8 @@
 import pytest
+
 from aic2026.models import Candidate, Query
 from aic2026.submission import competition_answer, validate_candidates
+
 
 def test_submission_limits_and_orders_scores():
     q = Query(query_id="q", type="kis", text="test")

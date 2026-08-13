@@ -10,35 +10,146 @@ from pydantic import ValidationError
 
 from aic2026.ingestion import load_manifest
 from aic2026.models import Candidate, Query
-from aic2026.submission import competition_answer, validate_candidates
+from aic2026.submission import competition_answer
+
+import re as _re
+
+# Ký tự có dấu tiếng Việt → dùng để nhận diện query tiếng Việt (cần dịch).
+_VI_MARK_RE = _re.compile(
+    r"[àáạảãâầấậẩẫăằắặẳẵđèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹ]",
+    _re.IGNORECASE,
+)
+
+
+def _is_english(text: str) -> bool:
+    """True nếu text KHÔNG chứa ký tự tiếng Việt có dấu."""
+    return not bool(_VI_MARK_RE.search(text or ""))
 
 
 class BackendRequestError(RuntimeError):
     """Raised when the UI cannot obtain a valid result from the backend."""
-st.set_page_config(page_title="PEGASUS Agent Console", layout="wide")
-st.markdown("""
+
+
+st.set_page_config(page_title="PEGASUS", layout="wide")
+
+st.markdown(
+    """
 <style>
-.keyframe-name { font-size: 1.7rem; font-weight: 800; color: #0f172a; padding: .7rem 1rem;
-  background: #f1f5f9; border-left: 7px solid #2563eb; border-radius: .35rem; word-break: break-all; }
-.gallery-caption { font-size: .8rem; color: #475569; word-break: break-all; }
+:root{
+  --peg-violet:#a78bda; --peg-pink:#e3a3c4; --peg-cyan:#7fcdd9; --peg-amber:#f59e0b;
+  --peg-ink:#3b3660; --peg-muted:#7c7894; --peg-line:rgba(167,139,218,.20);
+}
+/* Nền gradient tím - hồng - xanh đã hạ bão hòa (pastel) + glow nhẹ */
+html, body, [data-testid="stAppViewContainer"] { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+[data-testid="stAppViewContainer"] {
+  background:
+    radial-gradient(900px 500px at 12% -5%, rgba(227,163,196,.16), transparent 60%),
+    radial-gradient(800px 500px at 95% 0%, rgba(127,205,217,.14), transparent 60%),
+    radial-gradient(700px 600px at 50% 110%, rgba(167,139,218,.16), transparent 60%),
+    linear-gradient(160deg, #f7f4fc 0%, #fbf3f8 45%, #f1fafc 100%);
+  background-attachment: fixed;
+}
+
+/* ---- Header (gradient pastel + sparkle) ---- */
+.peg-header { position:relative; display:flex; align-items:center; gap:.7rem; overflow:hidden;
+  background: linear-gradient(110deg, #a78bda 0%, #e3a3c4 50%, #7fcdd9 100%);
+  padding:.6rem 1rem; border-radius:.8rem;
+  box-shadow: 0 8px 20px rgba(167,139,218,.28); margin-bottom:.7rem; }
+.peg-header::after { content:"✦ ✧ ❉ ✦"; position:absolute; top:.35rem; right:.7rem;
+  font-size:.7rem; color:rgba(255,255,255,.7); letter-spacing:.3rem; }
+.peg-logo { display:flex; align-items:center; justify-content:center;
+  width:46px; height:46px; flex:0 0 auto; background:rgba(255,255,255,.30);
+  border-radius:.65rem; border:1px solid rgba(255,255,255,.55);
+  box-shadow: inset 0 0 8px rgba(255,255,255,.35); }
+.peg-horse { width:34px; height:34px; display:block; }
+.peg-titles { display:flex; flex-direction:column; line-height:1.05; flex:1 1 auto; }
+.peg-word { font-size:1.35rem; font-weight:900; color:#fff; letter-spacing:.16em; margin:0;
+  text-shadow: 0 2px 8px rgba(80,60,120,.25); }
+.peg-sub { font-size:.66rem; color:rgba(255,255,255,.92); letter-spacing:.03em; margin-top:.1rem; }
+.peg-badge { background:rgba(255,255,255,.28); color:#fff; font-size:.66rem; font-weight:700;
+  padding:.28rem .55rem; border-radius:999px; border:1px solid rgba(255,255,255,.55);
+  white-space:nowrap; box-shadow:0 1px 6px rgba(80,60,120,.12); }
+
+/* ---- Topbar (glassmorphism) ---- */
+.topbar { background:rgba(255,255,255,.55); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+  border:1px solid rgba(255,255,255,.7); border-radius:.8rem;
+  padding:.6rem .8rem; margin-bottom:.7rem; box-shadow:0 4px 14px rgba(167,139,218,.12); }
+.mini-label { font-size:.64rem; text-transform:uppercase; letter-spacing:.07em;
+  color:#8b6fb5; margin-bottom:.15rem; font-weight:800; }
+
+/* ---- Gallery cards (glass + gradient accent) ---- */
+.hero-wrap { border-radius:.6rem; overflow:hidden; border:1px solid rgba(255,255,255,.8);
+  box-shadow:0 2px 8px rgba(167,139,218,.14); transition: transform .2s ease, box-shadow .2s ease; }
+.hero-wrap:hover { transform:translateY(-4px) scale(1.02); box-shadow:0 12px 24px rgba(227,163,196,.30); }
+.hero-wrap img { display:block; width:100%; border-radius:0; }
+.card-meta { font-size:.72rem; color:#4a4668; line-height:1.3; margin-top:.35rem;
+  background:rgba(255,255,255,.7); backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+  border:1px solid rgba(255,255,255,.8); border-left:3px solid #b9a0e0;
+  border-radius:.5rem; padding:.4rem .5rem; }
+.card-rank { font-weight:800; color:#c97aa6; }
+.card-video { font-weight:700; color:var(--peg-ink); }
+.card-answer { font-size:.7rem; background:linear-gradient(100deg,#f1fbfd,#fbeef7); color:#8a5a80;
+  border-radius:.35rem; padding:.2rem .45rem; margin-top:.3rem; display:inline-block;
+  max-width:100%; word-break:break-word; border:1px solid rgba(227,163,196,.30); }
+.small-muted { font-size:.75rem; color:var(--peg-muted); }
+.peg-pill { background:linear-gradient(100deg,#a78bda,#7fcdd9); color:#fff; font-size:.7rem; font-weight:700;
+  padding:.28rem .55rem; border-radius:999px; box-shadow:0 2px 8px rgba(167,139,218,.28); }
+
+/* ---- Grid / form elements (dịu màu) ---- */
+.stButton > button[data-testid="baseButton-primary"] {
+  background: linear-gradient(100deg,#a78bda 0%, #e3a3c4 55%, #7fcdd9 100%) !important;
+  color:#fff !important; font-weight:800 !important; letter-spacing:.04em;
+  border:none !important; border-radius:.65rem !important; padding:.55rem .5rem !important;
+  box-shadow: 0 6px 16px rgba(227,163,196,.30) !important;
+  transition: transform .15s ease, box-shadow .15s ease !important; }
+.stButton > button[data-testid="baseButton-primary"]:hover {
+  transform: translateY(-2px) !important;
+  box-shadow: 0 10px 22px rgba(167,139,218,.42) !important; }
+
+.stCheckbox > label { font-weight:700; color:var(--peg-ink); }
+input[type="checkbox"]:checked { accent-color:#c97aa6; }
+
+[data-testid="stSlider"] { color:#8b6fb5; }
+
+/* ---- Ô nhập liệu (text input) có viền đẹp ---- */
+.stTextInput > div > div > input {
+  border:1.5px solid #c9b6e8 !important; border-radius:.6rem !important;
+  background:rgba(255,255,255,.85) !important; color:var(--peg-ink) !important;
+  padding:.55rem .7rem !important; font-size:.9rem !important;
+  box-shadow:0 1px 4px rgba(167,139,218,.15) !important;
+  transition: border-color .15s ease, box-shadow .15s ease !important; }
+.stTextInput > div > div > input::placeholder { color:#a89fc4 !important; }
+.stTextInput > div > div > input:focus,
+.stTextInput > div > div > input:focus-visible {
+  border-color:#a78bda !important; outline:none !important;
+  box-shadow:0 0 0 3px rgba(167,139,218,.28) !important; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
+
+# Logo PEGASUS: đầu KỲ LÂN (unicorn) — path chuẩn từ Lucide Lab (license ISC),
+# vẽ nét (line-art) trắng trên nền xanh. Inline SVG, viewBox 0 0 24 24.
+PEGASUS_UNICORN_SVG = """
+<svg class="peg-horse" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"
+     stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+     aria-label="PEGASUS unicorn">
+  <path d="m15.6 4.8 2.7 2.3M15.5 10S19 7 22 2c-6 2-10 5-10 5m-.5 5H11"/>
+  <path d="M5 15a4 4 0 0 0 4 4h7.8l.3.3a3 3 0 0 0 4-4.46L12 7c0-3-1-5-1-5S8 3 8 7c-4 1-6 3-6 3"/>
+  <path d="M2 4.5C4 3 6 3 6 3l2 4M6.14 17.8S4 19 2 22"/>
+</svg>
+"""
 
 
-def run_backend(
-    task_type: str,
-    query: Query,
-    runtime: dict,
-    backend_url: str,
-):
+# ---------------------------------------------------------------------------
+# Backend call
+# ---------------------------------------------------------------------------
+def run_backend(task_type: str, query: Query, runtime: dict, backend_url: str):
     from aic2026.agent.types import AgentResult
 
     try:
         response = httpx.post(
-            (
-                f"{backend_url.rstrip('/')}"
-                f"/tasks/{task_type}/run"
-            ),
+            f"{backend_url.rstrip('/')}/tasks/{task_type}/run",
             json={
                 "query_id": query.query_id,
                 "text": query.text,
@@ -48,609 +159,428 @@ def run_backend(
             },
             timeout=300,
         )
-
         response.raise_for_status()
-        payload = response.json()
-
-        return AgentResult.model_validate(payload)
-
+        return AgentResult.model_validate(response.json())
     except httpx.TimeoutException as exc:
-        raise BackendRequestError(
-            "Backend xử lý quá thời gian cho phép."
-        ) from exc
-
+        raise BackendRequestError("Backend xử lý quá thời gian cho phép.") from exc
     except httpx.HTTPStatusError as exc:
-        status_code = exc.response.status_code
-
         try:
             detail = exc.response.json()
         except json.JSONDecodeError:
             detail = exc.response.text
-
-        raise BackendRequestError(
-            f"Backend trả HTTP {status_code}: {detail}"
-        ) from exc
-
+        raise BackendRequestError(f"Backend trả HTTP {exc.response.status_code}: {detail}") from exc
     except httpx.RequestError as exc:
-        raise BackendRequestError(
-            "Không thể kết nối tới backend. "
-            "Hãy kiểm tra FastAPI có đang chạy không."
-        ) from exc
-
-    except json.JSONDecodeError as exc:
-        raise BackendRequestError(
-            "Backend không trả về JSON hợp lệ."
-        ) from exc
-
-    except ValidationError as exc:
-        raise BackendRequestError(
-            "Dữ liệu backend không đúng schema AgentResult."
-        ) from exc
+        raise BackendRequestError("Không thể kết nối tới backend. Hãy kiểm tra FastAPI có đang chạy không.") from exc
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise BackendRequestError("Backend không trả về dữ liệu hợp lệ.") from exc
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 def parse_events(events_text: str) -> list[str]:
-    """Parse ordered TRAKE events from one event per line."""
-
-    events = [
-        line.strip(" -•\t")
-        for line in events_text.splitlines()
-        if line.strip()
-    ]
-
-    # Also support semicolon-separated events entered on one line.
-    # Do not split by commas because commas may belong to one event.
+    events = [line.strip(" -•\t") for line in events_text.splitlines() if line.strip()]
     if len(events) == 1 and ";" in events[0]:
-        events = [
-            part.strip()
-            for part in events[0].split(";")
-            if part.strip()
-        ]
-
+        events = [part.strip() for part in events[0].split(";") if part.strip()]
     return events
 
 
-def build_query(
-    query_type: str,
-    text: str,
-    question: str,
-    events_text: str,
-) -> Query:
+def build_query(query_type: str, text: str, question: str, events_text: str) -> Query:
     return Query(
         query_id="live-query",
-        type=query_type,
+        type=query_type or "kis",
         text=text.strip(),
         question=question.strip() or None,
         events=parse_events(events_text),
     )
 
+
 @st.cache_data(show_spinner=False)
-def load_keyframe_lookup(
-    manifest_path: str,
-) -> dict[tuple[str, int], str]:
-    """Map each video/frame pair to its keyframe path."""
+def load_keyframe_lookup(manifest_path: str) -> dict[tuple[str, int], str]:
+    records = load_manifest(Path(manifest_path))
+    return {(record.video_id, record.frame_id): record.keyframe_path for record in records}
 
-    records = load_manifest(
-        Path(manifest_path)
-    )
 
-    return {
-        (
-            record.video_id,
-            record.frame_id,
-        ): record.keyframe_path
-        for record in records
-    }
-
-def resolve_keyframe_path(
-    stored_path: str,
-    root: Path,
-) -> Path:
-    """Resolve an absolute or root-relative keyframe path."""
-
+def resolve_keyframe_path(stored_path: str, root: Path) -> Path:
     path = Path(stored_path)
-
-    if path.is_absolute():
+    if path.is_absolute() or path.exists():
         return path
-
+    for candidate in (
+        root / path,
+        Path.cwd() / path,
+        Path.cwd() / "data" / "raw" / path,
+        Path.cwd() / "data" / "processed" / path,
+    ):
+        if candidate.exists():
+            return candidate
     return root / path
+
 
 def keyframe_file(candidate: Candidate, root: Path) -> Path | None:
     if not candidate.keyframe_path:
         return None
-    path = Path(candidate.keyframe_path)
-    return path if path.is_absolute() else root / path
+    return resolve_keyframe_path(candidate.keyframe_path, root)
 
-def event_keyframe_file(
-    video_id: str,
-    frame_id: int,
-    lookup: dict[tuple[str, int], str],
-    root: Path,
-) -> Path | None:
-    """Resolve one TRAKE event frame through the active manifest."""
 
-    stored_path = lookup.get(
-        (
-            video_id,
-            frame_id,
-        )
-    )
-
+def event_keyframe_file(video_id: str, frame_id: int, lookup: dict[tuple[str, int], str], root: Path) -> Path | None:
+    stored_path = lookup.get((video_id, frame_id))
     if stored_path is None:
         return None
+    return resolve_keyframe_path(stored_path, root)
 
-    return resolve_keyframe_path(
-        stored_path=stored_path,
-        root=root,
-    )
-
-def render_trake_timeline(
-    query: Query,
-    candidate: Candidate,
-    root: Path,
-    manifest_path: str,
-) -> None:
-    """Render one ordered image for each TRAKE event."""
-
-    event_frames = candidate.event_frames or []
-
-    st.subheader(
-        f"TRAKE timeline — {candidate.video_id}"
-    )
-
-    if not event_frames:
-        st.error(
-            "Candidate TRAKE không chứa event_frames."
-        )
-        return
-
-    if len(event_frames) != len(query.events):
-        st.error(
-            "Số event frame không khớp với số event đầu vào: "
-            f"{len(event_frames)} frame / "
-            f"{len(query.events)} event."
-        )
-        return
-
-    try:
-        lookup = load_keyframe_lookup(
-            manifest_path
-        )
-    except (
-        FileNotFoundError,
-        ValueError,
-    ) as error:
-        st.error(
-            f"Không đọc được manifest: {error}"
-        )
-        return
-
-    for offset in range(
-        0,
-        len(event_frames),
-        3,
-    ):
-        end = min(
-            offset + 3,
-            len(event_frames),
-        )
-
-        columns = st.columns(
-            end - offset
-        )
-
-        for column, event_index in zip(
-            columns,
-            range(offset, end),
-            strict=True,
-        ):
-            frame_id = event_frames[event_index]
-            event_text = query.events[event_index]
-
-            path = event_keyframe_file(
-                video_id=candidate.video_id,
-                frame_id=frame_id,
-                lookup=lookup,
-                root=root,
-            )
-
-            with column:
-                st.markdown(
-                    f"### Event {event_index + 1}"
-                )
-
-                st.caption(event_text)
-
-                st.markdown(
-                    f"**Frame `{frame_id}`**"
-                )
-
-                if path and path.exists():
-                    st.image(
-                        str(path),
-                        caption=(
-                            f"{candidate.video_id} "
-                            f"| frame {frame_id}"
-                        ),
-                        use_container_width=True,
-                    )
-
-                    link = file_link(path)
-
-                    if link:
-                        st.link_button(
-                            "Mở ảnh",
-                            link,
-                            use_container_width=True,
-                        )
-                else:
-                    st.warning(
-                        "Không tìm thấy ảnh trong manifest."
-                    )
-
-                    if path:
-                        st.caption(str(path))
-
-# def file_link(path: Path | None) -> str | None:
-#     return path.as_uri() if path and path.exists() else None
 
 def file_link(path: Path | None) -> str | None:
     if not path or not path.exists():
         return None
     return path.resolve().as_uri()
 
-def select_candidate(index: int) -> None:
-    st.session_state["selected_candidate"] = index
+
+def build_btc_json(query: Query, candidates: list[Candidate], selected_idx: list[int]) -> list[dict]:
+    """Chỉ lấy candidate được tick, sort score giảm dần, format đúng BTC."""
+    picked = [candidates[i] for i in selected_idx if 0 <= i < len(candidates)]
+    picked.sort(key=lambda c: c.score, reverse=True)
+    return [competition_answer(query, c) for c in picked]
 
 
-st.title("PEGASUS - Agent tìm kiếm video")
-st.caption("Konichiwaiiii.")
+# ---------------------------------------------------------------------------
+# Gallery renderers (với checkbox chọn) — định nghĩa TRƯỚC phần gọi gallery
+# để tránh NameError khi Streamlit thực thi tuần tự từ trên xuống.
+# ---------------------------------------------------------------------------
+def _toggle(idx: int):
+    # Checkbox tự quản lý trạng thái qua key "sel_{idx}";
+    # mình chỉ đồng bộ ngược lại vào set "selected".
+    checked = st.session_state.get(f"sel_{idx}", False)
+    s = st.session_state["selected"]
+    if checked:
+        s.add(idx)
+    else:
+        s.discard(idx)
 
-controls, gallery = st.columns([1, 3], gap="large")
 
-with controls:
-    st.subheader("1. Chọn luồng")
-    if "query_type" not in st.session_state:
-        st.session_state["query_type"] = "kis"
-    for task, label in [("kis", "KIS"), ("qa", "Q&A"), ("trake", "TRAKE")]:
-        if st.button(label, use_container_width=True, type="primary" if st.session_state["query_type"] == task else "secondary"):
-            st.session_state["query_type"] = task
-    query_type = st.session_state["query_type"]
-    st.caption({"kis": "Tìm frame theo mô tả.", "qa": "Tìm frame rồi trả lời.", "trake": "Căn chỉnh chuỗi event."}[query_type])
-
-    st.subheader("2. Nhập query")
-    text = st.text_area("Đề BTC", height=115, placeholder="Dán nguyên văn câu hỏi vào đây", label_visibility="collapsed")
-    question = ""
-    events_text = ""
-    if query_type == "qa":
-        question = st.text_input("Câu hỏi Q&A", placeholder="Ví dụ: Có bao nhiêu người?")
-    if query_type == "trake":
-        events_text = st.text_area(
-            "Event theo thứ tự",
-            height=115,
-            placeholder=(
-                "Chạy đà\n"
-                "Giậm nhảy\n"
-                "Bay qua xà\n"
-                "Tiếp đất"
-            ),
-        )
-
-        parsed_events = parse_events(events_text)
-
-        st.caption(
-            f"Đã nhận {len(parsed_events)} event."
-        )
-
-        if len(parsed_events) == 1:
-            st.warning(
-                "TRAKE hiện chỉ nhận một event. "
-                "Hãy đặt mỗi event trên một dòng riêng "
-                "hoặc phân cách bằng dấu chấm phẩy (;)."
+def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], root: Path, selected: set[int]) -> None:
+    st.subheader(f"Gallery ({len(visible)} ảnh)")
+    grid = st.columns(5)
+    for pos, (idx, item) in enumerate(visible):
+        path = keyframe_file(item, root)
+        with grid[pos % 5]:
+            is_sel = idx in selected
+            if path and path.exists():
+                st.markdown('<div class="hero-wrap">', unsafe_allow_html=True)
+                st.image(str(path), use_container_width=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+            else:
+                st.caption("Không có ảnh")
+            answer_html = ""
+            if query.type == "qa":
+                ans = item.answer or "—"
+                answer_html = f'<div class="card-answer">Đáp: {html.escape(str(ans))}</div>'
+            st.markdown(
+                f'<div class="card-meta">'
+                f'<span class="card-rank">#{idx + 1}</span> '
+                f'<span class="card-video">{html.escape(item.video_id)}</span><br>'
+                f"frame {item.frame_id} · score {item.score:.3f}"
+                f"{answer_html}</div>",
+                unsafe_allow_html=True,
             )
+            st.checkbox("Chọn", key=f"sel_{idx}", on_change=_toggle, args=(idx,), label_visibility="collapsed")
 
-    with st.expander("Cấu hình backend/index", expanded=False):
-        backend_url = st.text_input("Backend API", "http://127.0.0.1:8000")
-        manifest_path = st.text_input("Manifest", "data/processed/derived_manifest.jsonl")
-        features_path = st.text_input("Feature .npy", "data/processed/derived_features.npy")
-        raw_root = Path(st.text_input("Root keyframe", "data/raw")).resolve()
-        encoder_name = st.selectbox("Text encoder", ["siglip2", "clip"])
-        encoder_model = st.text_input("SigLIP model", "google/siglip2-base-patch16-224")
-        llm_model = st.text_input("Ollama model", "qwen3:8b")
-        ollama_url = st.text_input("Ollama URL", "http://127.0.0.1:11434")
-    if "raw_root" not in locals():
-        # Values rendered inside an expander are still initialized on every Streamlit pass.
-        raw_root = Path("data/processed")
 
-    if st.button("Chạy Agent", type="primary", use_container_width=True, disabled=not text.strip()):
+def _render_trake_gallery(query: Query, visible: list[tuple[int, Candidate]], root: Path, selected: set[int]) -> None:
+    try:
+        manifest_path = st.session_state.get("manifest_path")
+        lookup = load_keyframed_lookup_safe(manifest_path) if manifest_path else {}
+    except (FileNotFoundError, ValueError):
+        lookup = {}
+
+    st.subheader(f"Gallery TRAKE ({len(visible)} video)")
+    for idx, item in visible:
+        is_sel = idx in selected
+        st.markdown(
+            f'<div class="card-meta"><span class="card-rank">#{idx + 1}</span> '
+            f'<span class="card-video">{html.escape(item.video_id)}</span> · '
+            f"score {item.score:.3f}</div>",
+            unsafe_allow_html=True,
+        )
+        event_frames = item.event_frames or []
+        if not event_frames:
+            st.caption("Candidate này không có event_frames.")
+        else:
+            if len(event_frames) != len(query.events):
+                st.caption(f"Số event frame không khớp: {len(event_frames)}/{len(query.events)}.")
+            rows = [event_frames[i : i + 4] for i in range(0, len(event_frames), 4)]
+            for row in rows:
+                cols = st.columns(len(row))
+                for col, frame_id in zip(cols, row):
+                    path = event_keyframe_file(item.video_id, frame_id, lookup, root)
+                    ev_idx = event_frames.index(frame_id)
+                    ev_text = query.events[ev_idx] if ev_idx < len(query.events) else f"event {ev_idx + 1}"
+                    with col:
+                        if path and path.exists():
+                            st.markdown('<div class="hero-wrap">', unsafe_allow_html=True)
+                            st.image(str(path), use_container_width=True)
+                            st.markdown("</div>", unsafe_allow_html=True)
+                        else:
+                            st.caption("Không có ảnh")
+                        st.caption(f"**{ev_text}**\nframe {frame_id}")
+        st.checkbox("Chọn video này", key=f"sel_{idx}", on_change=_toggle, args=(idx,))
+        st.divider()
+
+
+# ---------------------------------------------------------------------------
+# HEADER
+# ---------------------------------------------------------------------------
+st.markdown(
+    '<div class="peg-header">'
+    '<div class="peg-logo">'
+    f"{PEGASUS_UNICORN_SVG}"
+    "</div>"
+    '<div class="peg-titles">'
+    '<h1 class="peg-word">PEGASUS</h1>'
+    '<span class="peg-sub">AI Challenge 2026</span>'
+    "</div>"
+    '<span class="peg-badge">KHÔNG THẮNG THÌ THÔI</span>'
+    "</div>",
+    unsafe_allow_html=True,
+)
+
+
+# ===========================================================================
+# HÀNG TRÊN: NHẬP & CHẠY (3 khung cân đối: Luồng – Query – Chạy Agent)
+# ===========================================================================
+st.markdown('<div class="topbar">', unsafe_allow_html=True)
+
+# --- Chọn luồng (NGOÀI form để Enter luôn hoạt động) ---
+q_col, rest_col = st.columns([1, 4.4], gap="small")
+with q_col:
+    st.markdown('<div class="mini-label">Luồng</div>', unsafe_allow_html=True)
+    query_type = st.segmented_control(
+        "Luồng",
+        ["kis", "qa", "trake"],
+        default="kis",
+        key="query_type",
+        label_visibility="collapsed",
+    )
+
+# Input phụ (Q&A / TRAKE) — cũng ngoài form để cập nhật ngay khi gõ
+question = ""
+events_text = ""
+if query_type == "qa":
+    question = st.text_input("Câu hỏi Q&A", placeholder="Ví dụ: Có bao nhiêu người?", label_visibility="collapsed",
+                             key="query_question")
+if query_type == "trake":
+    events_text = st.text_input("Event (phân cách ;)", placeholder="Chạy đà;Giậm nhảy;Tiếp đất", label_visibility="collapsed",
+                                key="query_events")
+
+# --- Ô Query + nút Chạy trong CÙNG một form (Enter = submit) ---
+with rest_col:
+    with st.form("query_form", border=False):
+        t_col, run_col = st.columns([3.4, 1], gap="small")
+        with t_col:
+            st.markdown('<div class="mini-label">Query</div>', unsafe_allow_html=True)
+            text = st.text_input("Query", placeholder="Dán đề BTC vào đây (Enter để chạy)",
+                                 label_visibility="collapsed", key="query_text")
+        with run_col:
+            st.markdown('<div class="mini-label">&nbsp;</div>', unsafe_allow_html=True)
+            submitted = st.form_submit_button("Chạy Agent", type="primary", use_container_width=True)
+            if submitted:
+                st.session_state["_run_agent"] = True
+
+if st.session_state.get("_run_agent"):
+    st.session_state["_run_agent"] = False
+    if not text.strip():
+        st.warning("Hãy nhập query trước khi chạy Agent.")
+    else:
         try:
             query = build_query(query_type, text, question, events_text)
-            if query_type == "trake" and not query.events:
-                st.error("TRAKE cần ít nhất một event theo thứ tự.")
+            if query_type == "TRAKE" and not query.events:
+                st.error("TRAKE cần ít nhất một event.")
             else:
-                runtime = {"manifest_path": manifest_path, "features_path": features_path, "encoder": encoder_name, "encoder_model": encoder_model, "llm_model": llm_model, "ollama_url": ollama_url}
-                with st.spinner("Agent đang retrieval và điều phối task..."):
+                runtime = {
+                    "manifest_path": st.session_state.get("cfg_manifest", "data/processed/derived_manifest.jsonl"),
+                    "features_path": st.session_state.get("cfg_features", "data/processed/derived_features.npy"),
+                    "clip_pretrained": st.session_state.get("cfg_clip", "openai"),
+                    "llm_model": st.session_state.get("cfg_llm", "qwen3.5:4b"),
+                    "ollama_url": st.session_state.get("cfg_ollama", "http://127.0.0.1:11434"),
+                    "metadata_filter": st.session_state.get("cfg_filter", ""),
+                    "coarse_top_k": int(st.session_state.get("cfg_coarse_top_k", 200)),
+                }
+                backend_url = st.session_state.get("cfg_backend", "http://127.0.0.1:8000")
+                with st.spinner("Agent đang retrieval..."):
                     result = run_backend(query_type, query, runtime, backend_url)
                 st.session_state.update(
                     query=query,
                     candidates=result.candidates,
                     trace=result.trace,
-                    selected_candidate=0,
-                    raw_root=str(raw_root),
-                    manifest_path=manifest_path,
+                    raw_root=st.session_state.get("cfg_root", "data/processed"),
+                    manifest_path=runtime["manifest_path"],
+                    selected=set(),  # reset tick khi chạy query mới
                 )
-        except (
-            BackendRequestError,
-            ValidationError,
-        ) as error:
-            st.error(
-                f"Không chạy được agent: {error}"
-            )
+                # Lưu bản dịch (từ trace bước "translate") để hiển thị cho người dùng
+                translated = None
+                for step in result.trace:
+                    if step.step == "translate":
+                        try:
+                            _td = json.loads(step.detail)
+                            translated = _td.get("to")
+                        except (json.JSONDecodeError, ValueError, AttributeError):
+                            translated = None
+                        break
+                st.session_state["translated_query"] = translated
+                # Thông báo rõ ràng cho người dùng biết query đã được dịch
+                if translated:
+                    st.toast(f"✅ Đã dịch VI→EN: {translated}", icon="🌐")
+                elif text.strip() and _is_english(text):
+                    st.toast("ℹ️ Query đã là tiếng Anh — không cần dịch", icon="🌐")
+                else:
+                    st.toast("⚠️ Không dịch được (LLM lỗi?) — dùng nguyên bản tiếng Việt", icon="🌐")
+                # Xóa trạng thái widget checkbox cũ (sel_*) để không lệch với query mới
+                for k in [key for key in st.session_state.keys() if key.startswith("sel_")]:
+                    del st.session_state[k]
+        except (BackendRequestError, ValidationError) as error:
+            st.error(f"Không chạy được agent: {error}")
 
-    if "candidates" in st.session_state:
-        query: Query = st.session_state["query"]
-        candidates: list[Candidate] = st.session_state["candidates"]
-        if query.type == "qa" and not all(item.answer for item in candidates):
-            st.divider()
-            manual_answer = st.text_input("Answer Q&A thủ công")
-            if manual_answer and st.button("Áp dụng answer", use_container_width=True):
-                for item in candidates:
-                    if not item.answer:
-                        item.answer = manual_answer
-                st.rerun()
-        try:
-            ranked = validate_candidates(query, candidates)
-            payload = {"query_id": query.query_id, "type": query.type, "answers": [competition_answer(query, item) for item in ranked]}
-            st.download_button("Tải submission preview", json.dumps(payload, ensure_ascii=False, indent=2), file_name=f"{query.type}_answers.json", mime="application/json", use_container_width=True)
-        except ValueError as error:
-            st.caption(f"Chưa thể export: {error}")
+with st.expander("Cấu hình nâng cao"):
+    st.text_input("Backend API", "http://127.0.0.1:8000", key="cfg_backend")
+    st.text_input("Manifest", "data/processed/derived_manifest.jsonl", key="cfg_manifest")
+    st.text_input("Feature .npy", "data/processed/derived_features.npy", key="cfg_features")
+    st.text_input("Root keyframe", "data/processed", key="cfg_root")
+    st.text_input("CLIP pretrained", "openai", key="cfg_clip")
+    st.text_input("Ollama model", "qwen3.5:4b", key="cfg_llm")
+    st.text_input("Ollama URL", "http://127.0.0.1:11434", key="cfg_ollama")
+    st.text_input(
+        "Metadata / Object filter (phân cách dấu phẩy)",
+        "",
+        key="cfg_filter",
+        help=(
+            "Lọc video theo nhãn Object và Metadata (object_labels, title, description "
+            "trong manifest). Ví dụ: 'trong cửa hàng,máy tính' sẽ chỉ giữ các video có "
+            "chứa những nhãn này trước khi chạy retrieval/TRAKE. Để trống = không lọc."
+        ),
+    )
+    st.number_input(
+        "TRAKE: số video lọc nhanh (coarse_top_k)",
+        min_value=0,
+        max_value=5000,
+        value=200,
+        step=50,
+        key="cfg_coarse_top_k",
+        help=(
+            "Giới hạn số video đưa vào DP alignment cho luồng TRAKE. "
+            "Lọc nhanh (coarse) theo độ tương đồng video-level trước, chỉ top-K "
+            "video liên quan nhất mới xếp hạng chi tiết. Nhỏ = nhanh (dataset lớn), "
+            "lớn = đầy đủ nhưng chậm/OOM. 0 = xét hết mọi video."
+        ),
+    )
 
-with gallery:
-    if "candidates" not in st.session_state:
-        st.info(
-            "Nhập query ở cột trái rồi bấm **Chạy Agent**. "
-            "Kết quả hình ảnh sẽ chiếm phần lớn màn hình này."
-        )
+st.markdown("</div>", unsafe_allow_html=True)  # đóng .topbar
 
+# Hiển thị bản dịch tiếng Anh (nếu có) ngay dưới hàng nhập để dễ thấy bước trans
+_translated = st.session_state.get("translated_query")
+_query_text_raw = st.session_state.get("query_text", "")
+if _translated:
+    st.markdown(
+        f'<div style="margin:.1rem 0 .5rem;">'
+        f'<span class="peg-pill">🌐 Đã dịch (VI→EN)</span> '
+        f'<span class="small-muted">{html.escape(_translated)}</span></div>',
+        unsafe_allow_html=True,
+    )
+elif _query_text_raw and _is_english(_query_text_raw):
+    # Đã chạy, query gốc thực sự là tiếng Anh (không có dấu tiếng Việt)
+    st.markdown(
+        f'<div style="margin:.1rem 0 .5rem;">'
+        f'<span class="peg-pill">🌐 Đã kiểm tra dịch</span> '
+        f'<span class="small-muted">Query đã là tiếng Anh — không cần dịch.</span></div>',
+        unsafe_allow_html=True,
+    )
+
+st.markdown("<hr style='margin:.3rem 0 1rem;'>", unsafe_allow_html=True)
+
+
+# ===========================================================================
+# PHẦN DƯỚI: GALLERY ẢNH (TRUNG TÂM) + CHỌN + XUẤT JSON
+# ===========================================================================
+if "candidates" not in st.session_state:
+    st.info("Nhập query ở hàng trên rồi bấm **Chạy Agent**. Kết quả (tới 100 keyframe) hiện nguyên màn hình bên dưới để bạn xem và chọn.")
+else:
+    query: Query = st.session_state["query"]
+    candidates: list[Candidate] = st.session_state["candidates"]
+    root = Path(st.session_state.get("raw_root", "data/processed"))
+    # Đảm bảo session selected là set hợp lệ
+    if "selected" not in st.session_state or not isinstance(st.session_state["selected"], set):
+        st.session_state["selected"] = set()
+    selected: set[int] = st.session_state["selected"]
+
+    if not candidates:
+        st.warning("Agent không trả candidate. Hãy kiểm tra index hoặc đổi query.")
     else:
-        query: Query = st.session_state["query"]
-        candidates: list[Candidate] = st.session_state[
-            "candidates"
-        ]
+        total = len(candidates)
+        # candidates đã sort score giảm dần từ agent (hoặc sort lại cho chắc)
+        candidates.sort(key=lambda c: c.score, reverse=True)
 
-        root = Path(
-            st.session_state.get(
-                "raw_root",
-                "data/processed",
-            )
+        st.markdown(
+            f'<span class="peg-pill">Đã trả {total} candidate</span> '
+            f'<span class="small-muted">— tick ảnh để chọn, xuất JSON chuẩn BTC. '
+            f'Score cao nhất đứng đầu.</span>',
+            unsafe_allow_html=True,
         )
 
-        if not candidates:
-            st.warning(
-                "Agent không trả candidate. "
-                "Hãy kiểm tra index hoặc đổi query."
-            )
+        # Thanh công cụ: lọc video + giới hạn + chọn tất cả
+        col_filter, col_limit, col_all = st.columns([2, 1, 1])
+        with col_filter:
+            video_options = ["Tất cả"] + sorted({c.video_id for c in candidates})
+            selected_video = st.selectbox("Lọc theo video", video_options, index=0)
+        with col_limit:
+            if total <= 1:
+                max_show = total
+            else:
+                max_show = st.number_input(
+                    "Số ảnh hiển thị",
+                    min_value=1,
+                    max_value=total,
+                    value=min(20, total),
+                    step=1,
+                    key="max_show_input",
+                )
+        with col_all:
+            if st.button("Chọn tất cả hiển thị", use_container_width=True):
+                vis_idx = [
+                    i for i, c in enumerate(candidates)
+                    if (selected_video == "Tất cả" or c.video_id == selected_video)
+                ][:max_show]
+                selected.update(vis_idx)
+                st.rerun()
 
+        visible = [
+            (i, c) for i, c in enumerate(candidates)
+            if (selected_video == "Tất cả" or c.video_id == selected_video)
+        ][:max_show]
+
+        # ---- Gallery ảnh ----
+        if query.type == "TRAKE":
+            _render_trake_gallery(query, visible, root, selected)
         else:
-            selected_index = min(
-                st.session_state.get(
-                    "selected_candidate",
-                    0,
-                ),
-                len(candidates) - 1,
-            )
+            _render_frame_gallery(query, visible, root, selected)
 
-            selected = candidates[selected_index]
-
-            selected_path = keyframe_file(
-                selected,
-                root,
-            )
-
-            st.subheader(
-                f"Đang kiểm tra candidate "
-                f"#{selected_index + 1}"
-            )
-
-            # TRAKE candidate represents one video and contains
-            # one ordered frame ID for each input event.
-            if query.type == "trake":
-                manifest_path = st.session_state.get(
-                    "manifest_path"
+        # ---- Thanh xuất JSON ----
+        st.divider()
+        n_sel = len(selected)
+        st.markdown(f"**Đã chọn {n_sel} ảnh** (sẽ xuất theo thứ tự score giảm dần).")
+        if n_sel > 0:
+            btc_payload = build_btc_json(query, candidates, sorted(selected))
+            col_dl, col_cl = st.columns([1, 2])
+            with col_dl:
+                st.download_button(
+                    "📥 Tải JSON chuẩn BTC",
+                    json.dumps(btc_payload, ensure_ascii=False, indent=2),
+                    file_name=f"{query.type}_submission.json",
+                    mime="application/json",
+                    use_container_width=True,
                 )
+            with col_cl:
+                st.code(json.dumps(btc_payload[:3], ensure_ascii=False), language="json")
+        else:
+            st.caption("Chưa chọn ảnh nào. Tick vào ảnh ở gallery để xuất.")
 
-                if not manifest_path:
-                    st.error(
-                        "Không có manifest_path trong session. "
-                        "Hãy chạy lại Agent."
-                    )
-                else:
-                    render_trake_timeline(
-                        query=query,
-                        candidate=selected,
-                        root=root,
-                        manifest_path=str(
-                            manifest_path
-                        ),
-                    )
+        with st.expander("Trace agent (plan / retrieve / judge)"):
+            st.json([item.model_dump() for item in st.session_state["trace"]])
 
-            # Keep the existing single-frame interface
-            # unchanged for KIS and QA.
-            else:
-                keyframe_name = (
-                    selected_path.name
-                    if selected_path
-                    else "Không có keyframe path"
-                )
-
-                st.markdown(
-                    (
-                        '<div class="keyframe-name">'
-                        f"{html.escape(keyframe_name)}"
-                        "</div>"
-                    ),
-                    unsafe_allow_html=True,
-                )
-
-                st.caption(
-                    str(selected_path)
-                    if selected_path
-                    else ""
-                )
-
-                selected_link = file_link(
-                    selected_path
-                )
-
-                if selected_link:
-                    st.link_button(
-                        "Mở file keyframe",
-                        selected_link,
-                        use_container_width=False,
-                    )
-
-                if (
-                    selected_path
-                    and selected_path.exists()
-                ):
-                    st.image(
-                        str(selected_path),
-                        caption=(
-                            f"{selected.video_id} "
-                            f"| frame "
-                            f"{selected.frame_id}"
-                        ),
-                        use_container_width=True,
-                    )
-                else:
-                    st.warning(
-                        "Không tìm thấy ảnh keyframe "
-                        "theo path trong manifest."
-                    )
-
-            # Build the competition-format preview.
-            if (
-                query.type == "qa"
-                and not selected.answer
-            ):
-                preview = {
-                    "video_id": selected.video_id,
-                    "frame_id": selected.frame_id,
-                    "answer": "CẦN VLM/nhập tay",
-                }
-            else:
-                preview = competition_answer(
-                    query,
-                    selected,
-                )
-
-            st.subheader(
-                "Submission preview"
-            )
-            st.json(preview)
-
-            st.divider()
-
-            st.subheader(
-                f"Gallery kết quả "
-                f"({len(candidates)} candidate)"
-            )
-
-            for offset in range(
-                0,
-                len(candidates),
-                4,
-            ):
-                end = min(
-                    offset + 4,
-                    len(candidates),
-                )
-
-                cards = st.columns(
-                    end - offset
-                )
-
-                for column, index in zip(
-                    cards,
-                    range(offset, end),
-                    strict=True,
-                ):
-                    item = candidates[index]
-
-                    path = keyframe_file(
-                        item,
-                        root,
-                    )
-
-                    with column:
-                        if (
-                            path
-                            and path.exists()
-                        ):
-                            st.image(
-                                str(path),
-                                use_container_width=True,
-                            )
-                        else:
-                            st.caption(
-                                "Không có ảnh đại diện"
-                            )
-
-                        if query.type == "trake":
-                            event_frames = (
-                                item.event_frames
-                                or []
-                            )
-
-                            st.caption(
-                                f"#{index + 1} "
-                                f"| {item.video_id}\n"
-                                f"{len(event_frames)} "
-                                "event frames"
-                            )
-
-                            if event_frames:
-                                st.caption(
-                                    " → ".join(
-                                        str(frame_id)
-                                        for frame_id
-                                        in event_frames
-                                    )
-                                )
-                        else:
-                            st.caption(
-                                f"#{index + 1} "
-                                f"| {item.video_id}\n"
-                                f"frame {item.frame_id}"
-                            )
-
-                        item_link = file_link(
-                            path
-                        )
-
-                        if item_link:
-                            st.link_button(
-                                "Link ảnh",
-                                item_link,
-                                use_container_width=True,
-                            )
-
-                        st.button(
-                            "Kiểm tra",
-                            key=f"pick-{index}",
-                            on_click=select_candidate,
-                            args=(index,),
-                            use_container_width=True,
-                        )
-
-            with st.expander(
-                "Trace agent"
-            ):
-                st.json(
-                    [
-                        item.model_dump()
-                        for item
-                        in st.session_state[
-                            "trace"
-                        ]
-                    ]
-                )

@@ -5,6 +5,9 @@ __pycache__/
 data/raw/
 data/downloads/
 data/processed/*.jsonl
+data/processed/clip_features/*.npz
+data/processed/*.npy
 data/indexes/*
 !data/indexes/.gitkeep
-README.md
+outputs/
+*.bak.*

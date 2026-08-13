@@ -51,6 +51,11 @@ class FakeCv2Module(types.SimpleNamespace):
     CAP_PROP_POS_FRAMES = 0
     CAP_PROP_FRAME_COUNT = 1
     COLOR_BGR2RGB = 0
+    VideoCapture = FakeVideoCapture
+
+    @staticmethod
+    def cvtColor(frame, code):
+        return frame
 
 
 class FakeImageModule(types.SimpleNamespace):

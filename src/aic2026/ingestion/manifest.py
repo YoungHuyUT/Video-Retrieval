@@ -4,8 +4,8 @@ import json
 import re
 from pathlib import Path
 
-from aic2026.models import FrameRecord
 from aic2026.data_platform import inspect_official_assets
+from aic2026.models import FrameRecord
 
 
 def _frame_id(path: Path) -> int:
@@ -52,8 +52,7 @@ def build_manifest(raw_dir: Path, output: Path) -> int:
     if assets.keyframes is None:
         raise FileNotFoundError(f"No Keyframes directory found below {raw_dir}")
     records: list[FrameRecord] = []
-    vector_id = 0
-    for image in sorted([*assets.keyframes.rglob("*.jpg"), *assets.keyframes.rglob("*.png")]):
+    for vector_id, image in enumerate(sorted([*assets.keyframes.rglob("*.jpg"), *assets.keyframes.rglob("*.png")])):
             video_id = image.parent.name
             ordinal = _frame_id(image)
             meta, metadata_path = _metadata(assets.metadata, video_id)
@@ -75,7 +74,6 @@ def build_manifest(raw_dir: Path, output: Path) -> int:
                 metadata_path=_manifest_path(metadata_path, raw_dir) if metadata_path else None,
                 clip_feature_index=vector_id,
             ))
-            vector_id += 1
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join(r.model_dump_json() for r in records) + ("\n" if records else ""), encoding="utf-8")
     return len(records)
