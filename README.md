@@ -1,198 +1,301 @@
-# AIC 2026 — Video Retrieval (KIS / Q&A / TRAKE)
+# AIC 2026 — Hướng dẫn chạy hệ thống
 
-Pipeline cho 3 task vòng sơ tuyển AIC 2026, dựa trên **CLIP ViT-B-32** (index chính) + **BM25** (lexical từ Objects/Metadata). Bỏ SigLIP2. Chạy được **CPU-only**; VLM/Q&A GPU làm giai đoạn sau.
+Hệ thống chạy KIS, Q&A và TRAKE bằng **FAISS + CLIP features BTC + BM25**. Luồng chuẩn không dùng Chroma.
 
-## Mục lục
-1. [LƯU Ý WINDOWS — cách chạy lệnh](#1-lưu-ý-windows--cách-chạy-lệnh)
-2. [Cài đặt](#2-cài-đặt)
-3. [Cấu trúc dữ liệu](#3-cấu-trúc-dữ-liệu)
-4. [Cách chạy — Chế độ A: chỉ có Keyframes](#4-cách-chạy--chế-độ-a-chỉ-có-keyframes)
-5. [Cách chạy — Chế độ B: có đầy đủ data BTC](#5-cách-chạy--chế-độ-b-có-đầy-đủ-data-btc)
-6. [Chạy agent (KIS / Q&A / TRAKE)](#6-chạy-agent-kis--qa--trake)
-7. [Đánh giá (evaluate)](#7-đánh-giá-evaluate)
-8. [Giao diện UI](#8-giao-diện-ui)
-9. [Điểm quan trọng về frame_id và metadata](#9-điểm-quan-trọng-về-frame_id-và-metadata)
+## 1. Cài đặt
 
----
-
-## 1. LƯU Ý WINDOWS — cách chạy lệnh
-
-> ⚠️ **Quan trọng nhất:** bạn đang dùng **Windows (cmd / PowerShell)** thì **KHÔNG dùng dấu `\` xuống dòng** — đó là cú pháp Linux/Mac, cmd báo `'python' is not recognized` hoặc tương tự. Mỗi lệnh phải gõ **trên một dòng duy nhất**:
 
 ```bat
-:: ✅ ĐÚNG — tất cả trên 1 dòng, cmd chạy được
-python -m aic2026.cli embed-keyframes --keyframes-dir data/raw/Keyframes --features-dir data/processed/clip_features --manifest data/processed/derived_manifest.jsonl --features data/processed/derived_features.npy --video-id L21_V001
-
-
-- Lệnh dài thì **copy nguyên cụm 1 dòng** từ README dán vào terminal là được.
-- PowerShell muốn xuống dòng thì dùng `` ` `` (backtick) — nhưng khuyến nghị cứ gõ 1 dòng cho chắc.
-- Tất cả code block dạng `bat` trong README này đã được viết **sẵn trên 1 dòng**, copy nguyên văn là chạy được.
-
----
-
-## 2. Cài đặt
-
-> ⚠️ Nếu bạn **đã có `.venv`** rồi (đang chạy được code), **KHÔNG chạy lại `python -m venv .venv`** — lệnh đó chỉ cần lần đầu.
-
-```bash
-# Python 3.11+
-python -m venv .venv        # CHỈ LẦN ĐẦU khi chưa có .venv
-# Linux/Mac
-source .venv/bin/activate
-# Windows
-.venv\Scripts\activate
-
-# Dùng uv (nhanh, khuyến nghị) — nhớ --extra agent (langgraph cho pipeline agent)
-uv sync --extra retrieval --extra models --extra video --extra agent --extra dev
-# Hoặc pip
-pip install -e ".[retrieval,models,video,agent,dev]"
+.venv\Scripts\Activate
+uv sync --extra retrieval --extra models --extra video --extra dev
 ```
 
-> **Nếu `uv sync` báo "Access denied" (zstandard .pyd):** có tiến trình python đang giữ file. Đóng hết cửa sổ dùng `.venv` (Streamlit, server agent), rồi chạy lại `uv sync`.
+Không dùng `uv` thì:
 
-Cài Ollama (cho planner/judge) — **model nào cũng được** (qwen3.5:4b, qwen3:8b, llama3.1...). Mặc định code dùng `qwen3.5:4b`; đổi qua flag `--llm-model` nếu cần:
-```bash
-ollama pull qwen3.5:4b
-ollama serve   # chạy ở terminal khác
+```bat
+pip install -e ".[retrieval,models,video,dev]"
+
 ```
 
----
+FAISS phải hoạt động; nếu thiếu, hệ thống fallback NumPy và sẽ chậm hơn:
+```bat
+python -c "import faiss; print(faiss.__version__)"
+```
 
-## 3. Cấu trúc dữ liệu
+## 2. Dữ liệu và file quan trọng
 
 ```text
 data/
 ├── raw/
-│   ├── Videos/        # .mp4 gốc (BTC) — KHÔNG bắt buộc
-│   ├── Keyframes/     # keyframe BTC (bắt buộc) — L01_V001/0000.jpg, ...
-│   ├── Objects/       # JSON Faster R-CNN (tùy chọn, nên có)
-│   ├── Metadata/      # JSON YouTube (tùy chọn, nên có)
-│   └── CLIP features/ # 1 file .npy CLIP ViT-B-32 (tùy chọn, nên có)
-├── downloads/         # ZIP hỗ trợ BTC (clip-features, map-keyframes, media-info, objects)
-└── processed/         # Code tự sinh: manifest, features, index
+│   ├── Keyframes/       # JPG: Keyframes/L01_V001/001.jpg
+│   ├── Objects/         # object labels BTC
+│   ├── Metadata/        # metadata video BTC
+│   ├── CLIP features/   # file hoặc thư mục .npy BTC
+│   └── Videos/          # tùy chọn
+└── processed/
+    ├── official_features.npy
+    ├── official_manifest.jsonl
+    └── official_manifest_ocr.jsonl   # chỉ có sau OCR
 ```
 
-**Nguyên tắc:** pipeline chạy tốt **chỉ với Keyframes** (Chế độ A). Các nhóm còn lại (Objects/Metadata/CLIP features) làm cho retrieval **chính xác hơn** — điền vào sau càng tốt, code tự phát hiện và dùng.
+- `frame_id` là vị trí frame thật trong video gốc, nên không cần liên tiếp.
+- Giữ `official_features.npy` và `official_manifest.jsonl`; đây là index chính.
+- Keyframes chỉ cần cho gallery, OCR và VLM Q&A. Không có ảnh vẫn retrieval CLIP được, nhưng không OCR/VLM được frame đó.
 
-> **Nếu bạn đã tự extract keyframe bằng CLI (`extract-keyframes`)** thì thư mục là `data/raw/keyframes` (chữ thường) thay vì `data/raw/Keyframes`. Các lệnh dưới đây viết theo tên chuẩn BTC (`Keyframes`); bạn đổi cho khớp với tên thư mục thực tế của mình.
+## 3. Chuẩn bị index chính thức
 
----
+Kiểm tra asset BTC:
 
-## 4. Cách chạy — Chế độ A: chỉ có Keyframes
-
-Nếu bạn **chỉ có thư mục Keyframes** (chưa có Objects/Metadata/CLIP features):
-
-```bat
-:: 1. Encode toàn bộ keyframe bằng CLIP ViT-B-32 (tạo features + manifest + index)
-::    Bỏ --video-id để encode hết; hoặc chỉ 1 video để test nhanh (1 dòng duy nhất)
-python -m aic2026.cli embed-keyframes --keyframes-dir data/raw/Keyframes --features-dir data/processed/clip_features --manifest data/processed/derived_manifest.jsonl --features data/processed/derived_features.npy --video-id L21_V001
-
-:: 2. Kiểm tra index khớp (số feature = số manifest)
-python -m aic2026.cli check-features data/processed/derived_features.npy data/processed/derived_manifest.jsonl
-```
-
-> **Lưu ý:** ở chế độ này `frame_id` = thứ tự (ordinal) trong tên file keyframe (vì chưa có Metadata để map). Chạy KIS/TRAKE vẫn được, nhưng khi bạn có Metadata BTC, hãy chuyển sang Chế độ B để map `frame_id` thật.
-
----
-
-## 5. Cách chạy — Chế độ B: có đầy đủ data BTC
-
-Nếu bạn có **Keyframes + Objects + Metadata + CLIP features** (đầy đủ 5 nhóm):
-
-### Bước 1 — Giải nén ZIP hỗ trợ (nếu BTC cấp dạng ZIP)
-```bat
-python -m aic2026.cli unpack-support-assets --archives-dir data/downloads --destination data/raw/support
-```
-
-### Bước 2 — Kiểm tra nhận diện 5 nhóm asset
 ```bat
 python -m aic2026.cli inspect-data --raw-dir data/raw
 ```
 
-### Bước 3 — Probe file CLIP features chính thức (xác định thứ tự hàng trong .npy)
-> Nếu tên thư mục có khoảng trắng như `CLIP features`, bọc đường dẫn trong dấu `"..."` — 1 dòng duy nhất:
+Tạo feature matrix và manifest căn đúng `frame_id`:
+
 ```bat
-python -m aic2026.cli probe-official-features --features "data/raw/CLIP features/clip_feature.npy" --raw-dir data/raw --metadata-dir data/raw/Metadata
+python -m aic2026.cli prepare-official --features "data/raw/CLIP features" --raw-dir data/raw --output-manifest data/processed/official_manifest.jsonl --output-features data/processed/official_features.npy
 ```
 
-### Bước 4 — Build manifest + index khớp đúng frame_id thật
-```bat
-python -m aic2026.cli prepare-official --features "data/raw/CLIP features/clip_feature.npy" --raw-dir data/raw --output-manifest data/processed/official_manifest.jsonl --output-features data/processed/official_features.npy
+Kiểm tra số vector khớp manifest:
 
-:: Kiểm tra khớp
+```bat
 python -m aic2026.cli check-features data/processed/official_features.npy data/processed/official_manifest.jsonl
 ```
 
-### Bước 5 — (Tùy chọn) Nếu không có CLIP features BTC, tự encode từ Keyframes
-```bat
-python -m aic2026.cli embed-keyframes --keyframes-dir data/raw/Keyframes --features-dir data/processed/clip_features --manifest data/processed/derived_manifest.jsonl --features data/processed/derived_features.npy
-```
+Chỉ chạy mục này khi nhận/thay dữ liệu BTC, không chạy lại trước mỗi query.
 
----
+### Khi chỉ có Keyframes
 
-## 6. Đánh giá (evaluate)
-
-Đánh giá 1 query với ground-truth theo đúng công thức R@k + Final Score của BTC.
-
-> ⚠️ **Lệnh `evaluate` nhận 3 argument vị trí (`query candidates ground_truth`), KHÔNG phải flag `--query/--candidates/--ground-truth`.**
-> Đồng thời, `agent-query` ghi file kết quả dạng object `{candidates, plan, trace}` — nhưng `evaluate` cần **một JSON array** `[{...candidate}, ...]`. Vì vậy phải trích mảng `candidates` ra trước:
+Nếu chưa có CLIP features BTC, tự encode. Thử một video trước:
 
 ```bat
-:: 1. Trích mảng candidates từ kết quả agent-query (dùng JQ nếu có, hoặc script nhỏ bên dưới)
-jq ".candidates" outputs/result_kis.json > outputs/candidates_kis.json
-
-:: 2. Đánh giá — lưu ý 3 argument vị trí, không có --query/--candidates
-python -m aic2026.cli evaluate query_kis.json outputs/candidates_kis.json ground_truth_kis.json
+python -m aic2026.cli embed-keyframes --keyframes-dir data/raw/Keyframes --features-dir data/processed/clip_features --manifest data/processed/derived_manifest.jsonl --features data/processed/derived_features.npy --video-id L21_V001
 ```
+Bỏ `--video-id` để chạy toàn bộ. Dùng rõ `derived_*` ở UI/CLI. Luồng này thiếu Objects/Metadata nên BM25 thường yếu hơn `official_*`.
 
-Nếu không có `jq`, tạo `outputs/candidates_kis.json` bằng lệnh sau:
-```bat
-python -c "import json; d=json.load(open('outputs/result_kis.json', encoding='utf-8')); json.dump(d['candidates'], open('outputs/candidates_kis.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=2)"
-```
+## 4. Chạy UI
 
-**Ground truth** theo schema `GroundTruth` (`video_id`, `ranges: [[start,end], ...]`, `answer?`):
-```json
-{
-  "video_id": "L01_V001",
-  "ranges": [[500, 510]]
-}
-```
+Mở hai terminal đã activate `.venv`.
 
-> **Q&A:** đánh giá **ngữ nghĩa** (đúng quy định BTC) — không so chuỗi chính xác. "màu xanh" vs "xanh", "xanh lá cây" vs "màu xanh lá" đều tính là khớp.
-
----
-
-## 8. Giao diện UI
-
-> ⚠️ Chạy **từ thư mục gốc dự án** (`D:\MinhHuy\AIC2026`) — đường dẫn tương đối trong code (`data/...`, `src/...`) được tính theo thư mục làm việc hiện tại.
+Terminal 1 — backend (giữ mở để cache index, BM25 và CLIP):
 
 ```bat
-:: Backend FastAPI (terminal 1) — mở trong thư mục gốc dự án
 python -m aic2026.cli serve
+```
 
-:: Giao diện Streamlit (terminal 2)
+Terminal 2 — UI:
+
+```bat
 streamlit run src/aic2026/app/ui.py
 ```
 
-Mở `http://127.0.0.1:8000` (API docs) và `http://127.0.0.1:8501` (UI).
+Mở `http://127.0.0.1:8501`.
+- KIS: nhập mô tả cảnh.
+- Q&A: nhập mô tả retrieval và câu hỏi.
+- TRAKE: nhập mô tả và event theo đúng thứ tự thời gian.
+- Mặc định UI dùng `official_manifest.jsonl` và `official_features.npy`.
+- Không bật **Dịch VI→EN** nếu đã nhập tiếng Anh. Khi bật, UI hiển thị bản dịch và báo rõ khi LLM fallback.
 
----
+Query đầu sau khi start backend chậm vì phải load features/manifest/BM25. Query KIS tiếp theo phải nhanh hơn; không restart backend giữa các query.
 
-## 9. Điểm quan trọng về frame_id và metadata
+## 5. Chạy CLI
 
-1. **frame_id là frame index thật của video**, không phải thứ tự keyframe. Khi có Metadata BTC (field `frame_indices`/`keyframe_indices`), `prepare-official` sẽ map đúng. Ở Chế độ A (chỉ Keyframes) thì tạm dùng ordinal.
-2. **Metadata filter tăng precision:** với query như "người đi bộ trong cửa hàng", pipeline có thể **lọc video theo metadata** ("cửa hàng") trước khi CLIP search — giảm frame sai, tăng precision. Code đã có sẵn `filter_videos_by_metadata`.
-3. **Videos (.mp4) không bắt buộc** — chỉ cần khi re-extract keyframe fallback.
-4. **Submission tối đa 100 answers/query**, chỉ xuất field đúng chuẩn BTC (`video_id`, `frame_id`, `answer`, `frame_ids`).
-
----
-
-## Cấu hình
-
-Cấu hình chạy được truyền trực tiếp qua CLI (`aic2026 --help`) và qua UI "Cấu hình nâng cao" (Backend API, Manifest, Feature, CLIP pretrained, Ollama model/URL, Metadata/Object filter, `coarse_top_k`). Không dùng file config YAML.
-
-## Test
-
-```bash
-python -m pytest tests/ -q
+```bat
+mkdir outputs
 ```
+
+### KIS
+
+`query_kis.json`:
+
+```json
+{"query_id":"kis_001","type":"kis","text":"a speaker giving a speech at an outdoor event"}
+``````bat
+python -m aic2026.cli agent-query --query query_kis.json --backend faiss --output outputs/result_kis.json
+```
+
+### Q&A
+
+Q&A cần Ollama vision model:
+
+```bat
+ollama pull qwen2.5vl:3b
+ollama serve
+```
+
+`query_qa.json`:
+
+```json
+{"query_id":"qa_001","type":"qa","text":"an award ceremony on a stage","question":"How many people are on the stage?"}
+```
+
+```bat
+python -m aic2026.cli agent-query --query query_qa.json --backend faiss --vlm-backend ollama --vlm-model qwen2.5vl:3b --output outputs/result_qa.json
+```
+
+Q&A chỉ sinh `answer` khi candidate có file JPG để VLM đọc.
+
+### TRAKE
+`query_trake.json`:
+
+```json
+{"query_id":"trake_001","type":"trake","text":"high jump sequence","events":["running toward the bar","jumping over the bar","landing on the mat"]}
+```
+
+Chạy thử nhanh với coarse filter 50 video:
+
+```bat
+python -m aic2026.cli agent-query --query query_trake.json --backend faiss --coarse-top-k 50 --output outputs/result_trake.json
+```
+
+Tăng `--coarse-top-k` để tăng recall, nhưng TRAKE chậm hơn vì DP căn chỉnh nhiều video hơn.
+
+### Dịch Việt → Anh
+
+Mặc định tắt. Bật khi query là tiếng Việt:
+```bat
+python -m aic2026.cli agent-query --query query_kis.json --backend faiss --translate --output outputs/result_kis.json
+```
+
+Với query tìm chữ, đặt text đích trong ngoặc kép:
+
+```text
+Hình ảnh tấm bảng có chữ "BENVENUTI"
+```
+
+Hệ thống giữ nguyên `"BENVENUTI"` và dùng truy vấn literal `an image of a sign with the text "BENVENUTI"`.
+
+### Lọc Object/Metadata
+
+Chỉ dùng khi chắc từ khóa có trong dữ liệu BTC; filter quá chặt có thể mất recall:
+
+```bat
+python -m aic2026.cli agent-query --query query_kis.json --backend faiss --metadata-filter "concert,outdoor" --output outputs/result_kis.json
+```
+
+## 6. OCR — tìm chữ trên biển/bảng/logo
+
+OCR không tự chạy và không nằm trong CLIP feature. Nó ghi text nhận dạng vào `object_labels` của manifest OCR để BM25 tìm khớp chính xác.
+Chỉ OCR được frame có JPG trong `data/raw/Keyframes`.
+
+Cài PaddleOCR một lần:
+
+```bat
+:: Cài PaddlePaddle CPU từ source Windows chính thức
+python -m pip install --force-reinstall paddlepaddle==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+python -m pip install paddleocr
+
+:: Phải in được version trước khi chạy OCR
+python -c "import paddle; print(paddle.__version__)"
+```
+
+> **Kiểm tra bắt buộc.** Không chạy OCR nếu lệnh import trên lỗi. Khi OCR không
+> khởi động được, pipeline vẫn hoàn tất nhưng không thêm được dòng chữ nào vào
+> manifest. Nếu báo `DLL load failed`/`libpaddle.pyd`, xem hướng dẫn bên dưới.
+
+Code OCR tự tắt các model phụ dành cho tài liệu (xoay trang, nắn ảnh, hướng dòng
+text) để giảm download/RAM; keyframe video chỉ tải model detection + recognition cần thiết.
+
+Nếu lệnh import báo lỗi `DLL load failed`/`libpaddle.pyd`, đóng mọi Python/Streamlit,
+cài hoặc Repair **Microsoft Visual C++ 2015–2022 Redistributable (x64)**, rồi chạy lại
+lệnh cài CPU ở trên. Không chạy `ocr-manifest` cho đến khi `import paddle` thành công.
+
+Mỗi lần chạy hiện dùng một model ngôn ngữ. Để nhận tốt cả tiếng Việt lẫn tiếng Anh,
+chạy hai lượt: lượt hai nhận manifest của lượt một làm input nên text được **gộp** vào
+`object_labels`, không bị mất.
+
+```bat
+:: Lượt 1: tiếng Việt (cũng đọc được ký tự Latin cơ bản)
+python -m aic2026.cli ocr-manifest --manifest data/processed/official_manifest.jsonl --output data/processed/official_manifest_ocr_vi.jsonl --keyframes-root data/raw/Keyframes --lang vi --batch-size 16
+
+:: Lượt 2: tiếng Anh/Latin, gộp thêm vào kết quả lượt 1
+python -m aic2026.cli ocr-manifest --manifest data/processed/official_manifest_ocr_vi.jsonl --output data/processed/official_manifest_ocr.jsonl --keyframes-root data/raw/Keyframes --lang en --batch-size 16
+```
+
+Lệnh trên **không ghi đè** `official_manifest.jsonl` gốc. CPU OCR toàn bộ
+177k keyframe có thể mất nhiều giờ. Nếu thiếu RAM, giảm `--batch-size 16`
+thành `--batch-size 8`.
+
+OCR lưu tại:
+
+```text
+data/processed/official_manifest_ocr.jsonl
+```
+
+Kiểm tra text đã được OCR:
+
+```bat
+findstr /I /C:"BENVENUTI" data\processed\official_manifest_ocr.jsonl
+```
+
+Nếu không có dòng nào, OCR không nhận được chữ đó hoặc ảnh chứa chữ chưa có trên máy.
+
+Kiểm tra tổng quát hơn rằng manifest OCR **thực sự khác** manifest gốc (đếm số
+frame có text/label được OCR thêm vào):
+
+```powershell
+python -c "import json; from pathlib import Path; a=Path('data/processed/official_manifest.jsonl').open(encoding='utf8'); b=Path('data/processed/official_manifest_ocr.jsonl').open(encoding='utf8'); d=[any(v not in x.get('object_labels',[]) for v in y.get('object_labels',[])) for x,y in ((json.loads(i),json.loads(j)) for i,j in zip(a,b))]; print(f'frames with added OCR text: {sum(d):,} / {len(d):,}')"
+```
+
+Nếu kết quả là `0`, OCR chưa sinh text: kiểm tra log `PaddleOCR` ở lúc chạy,
+đảm bảo `data/raw/Keyframes` có JPG, rồi chạy lại hai lượt OCR. Sau OCR:
+
+- UI: trong **Cấu hình nâng cao → Manifest**, đặt `data/processed/official_manifest_ocr.jsonl`, rồi restart backend.
+- CLI: thêm `--manifest data/processed/official_manifest_ocr.jsonl`.
+
+Ví dụ:
+
+```bat
+python -m aic2026.cli agent-query --query query_kis.json --backend faiss --manifest data/processed/official_manifest_ocr.jsonl --output outputs/result_benvenuti.json
+```
+
+Không cần build Chroma hoặc tạo lại CLIP features sau OCR.
+
+## 7. Đánh giá
+
+`agent-query` ghi object có `candidates`, `plan`, `trace`; `evaluate` cần JSON array candidates:
+
+```bat
+python -c "import json; d=json.load(open('outputs/result_kis.json', encoding='utf-8')); json.dump(d['candidates'], open('outputs/candidates_kis.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=2)"
+```Ground truth `ground_truth_kis.json` ví dụ:
+
+```json
+{"video_id":"L01_V001","ranges":[[500,510]]}
+```
+
+```bat
+python -m aic2026.cli evaluate query_kis.json outputs/candidates_kis.json ground_truth_kis.json
+```
+
+## 8. Khắc phục lỗi
+
+| Triệu chứng | Xử lý |
+|---|---|
+| Query đầu tiên chậm | Bình thường: backend đang load index, CLIP và BM25. Giữ `serve` chạy. |
+| Mọi query chậm | Kiểm tra `import faiss`; không restart backend mỗi query. |
+| `200 OK` nhưng UI không hiện | Backend đã trả lời, UI/browser có thể reset kết nối. Refresh UI và thử lại khi backend vẫn chạy. |
+| `LLM translate failed` | Ollama/model dịch lỗi; dùng query tiếng Anh hoặc để UI dùng fallback. |
+| Không tìm `BENVENUTI` | Chưa chạy OCR, chưa dùng manifest OCR, OCR không đọc được chữ, hoặc ảnh keyframe chưa có. |
+| Q&A không có `answer` | Ollama VLM chưa chạy/model chưa tải/candidate không có ảnh. |
+| Thiếu manifest/features | Chạy lại mục 3 bằng `prepare-official`. |
+
+## 9. Dọn dữ liệu
+
+Giữ:
+```text
+data/raw/
+data/processed/official_features.npy
+data/processed/official_manifest.jsonl
+data/processed/official_manifest_ocr.jsonl  # nếu đã chạy OCR
+```
+
+Có thể xóa vì sinh lại được:
+
+```text
+outputs/
+.pytest_cache/
+.ruff_cache/
+data/processed/clip_features/
+```
+
+Luồng chuẩn không có Chroma.
