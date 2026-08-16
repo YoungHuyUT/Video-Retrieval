@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from aic2026.ingestion import load_manifest
 from aic2026.models import Candidate, Query
-from aic2026.submission import competition_answer
+from aic2026.submission import competition_answer, csv_row
 
 import re as _re
 
@@ -240,6 +240,16 @@ def build_btc_json(query: Query, candidates: list[Candidate], selected_idx: list
     picked = [candidates[i] for i in selected_idx if 0 <= i < len(candidates)]
     picked.sort(key=lambda c: c.score, reverse=True)
     return [competition_answer(query, c) for c in picked]
+
+
+def build_btc_csv(query: Query, candidates: list[Candidate], selected_idx: list[int]) -> str:
+    """Chỉ lấy candidate được tick, sort score giảm dần, format CSV chuẩn BTC.
+
+    Trả về text CSV thuần túy (không header row, LF), sẵn sàng tải về nộp bài.
+    """
+    picked = [candidates[i] for i in selected_idx if 0 <= i < len(candidates)]
+    picked.sort(key=lambda c: c.score, reverse=True)
+    return "\n".join(csv_row(query, c) for c in picked)
 
 
 # ---------------------------------------------------------------------------
@@ -591,23 +601,23 @@ else:
         else:
             _render_frame_gallery(query, visible, root, selected)
 
-        # ---- Thanh xuất JSON ----
+        # ---- Thanh xuất CSV chuẩn nộp bài BTC ----
         st.divider()
         n_sel = len(selected)
         st.markdown(f"**Đã chọn {n_sel} ảnh** (sẽ xuất theo thứ tự score giảm dần).")
         if n_sel > 0:
-            btc_payload = build_btc_json(query, candidates, sorted(selected))
+            btc_csv = build_btc_csv(query, candidates, sorted(selected))
             col_dl, col_cl = st.columns([1, 2])
             with col_dl:
                 st.download_button(
-                    "📥 Tải JSON chuẩn BTC",
-                    json.dumps(btc_payload, ensure_ascii=False, indent=2),
-                    file_name=f"{query.type}_submission.json",
-                    mime="application/json",
+                    "📥 Tải CSV chuẩn BTC",
+                    btc_csv,
+                    file_name=f"query-{query.query_id}-{query.type}.csv",
+                    mime="text/csv",
                     use_container_width=True,
                 )
             with col_cl:
-                st.code(json.dumps(btc_payload[:3], ensure_ascii=False), language="json")
+                st.code(btc_csv, language="text")
         else:
             st.caption("Chưa chọn ảnh nào. Tick vào ảnh ở gallery để xuất.")
 

@@ -22,6 +22,14 @@ class RetrievalAgent:
         llm: LocalLLM | None = None,
         answer_limit: int = 100,
         retrieval_pool_size: int = 500,
+        # Optional per-task dataset-split *preference* (video_id prefixes). Both
+        # KIS and Q&A search the FULL corpus (no restriction) — KIS is whole-video
+        # by nature, and Q&A reads OCR'd text that lives across splits. TRAKE
+        # *prefers* L26 (the large TRAKE-oriented set) as a soft bias, but is NOT
+        # hard-restricted to it: BTC event queries are generic and match many
+        # splits, so excluding L21/L22/L25/etc. would silently zero recall. Pass
+        # None to disable the preference; pass a concrete list to override it.
+        trake_preferred_prefixes: list[str] | None = None,
     ) -> None:
         if answer_limit <= 0:
             raise ValueError("answer_limit must be greater than zero")
@@ -41,6 +49,7 @@ class RetrievalAgent:
         # (~100GB, hàng chục nghìn video) cần K nhỏ (200) để DP không chạy trên
         # vài nghìn video. 0 = xét hết (backward-compatible).
         self.coarse_top_k = 200
+        self.trake_preferred_prefixes = trake_preferred_prefixes
         # Bật dịch VI→EN tự động. Mặc định False (tắt) vì:
         #  (1) người dùng có thể nhập sẵn tiếng Anh;
         #  (2) dịch phụ thuộc Ollama — nếu fail thì gây ra frame sai;
@@ -193,6 +202,13 @@ class RetrievalAgent:
                 plan=plan,
             )
 
+            # TRAKE searches the FULL corpus. We do NOT hard-restrict to L26: BTC
+            # event queries are generic and match many splits, so excluding
+            # L21/L22/L25/... would silently zero recall (verified: a generic
+            # "enters room / sits" query returns 0 L26 candidates). Instead we
+            # pass L26 as a soft *preference* so it is nudged up without being
+            # the only allowed split. Override via trake_preferred_prefixes.
+            self.tools.video_prefixes = None
             candidates = self.tools.retrieve_trake(
                 events=events,
                 limit=self.answer_limit,
@@ -200,6 +216,11 @@ class RetrievalAgent:
                     self.retrieval_pool_size
                 ),
                 coarse_top_k=self.coarse_top_k,
+                preferred_prefixes=(
+                    self.trake_preferred_prefixes
+                    if self.trake_preferred_prefixes is not None
+                    else ["L26"]
+                ),
             )
 
             trace.append(
@@ -222,6 +243,11 @@ class RetrievalAgent:
         # Multi-query expansion was tried but added a second LLM round-trip
         # (slower) for marginal recall gain on short, specific BTC queries,
         # so we keep a single translation + single retrieval for speed.
+        # Both KIS and Q&A search the FULL corpus (no split restriction): KIS is
+        # whole-video retrieval by nature, and Q&A reads OCR'd text that spans
+        # every split. OCR itself is scoped to L25 at build time; retrieval is
+        # not.
+        self.tools.video_prefixes = None
         found = self.tools.retrieve(
             query=query.text,
             limit=self.retrieval_pool_size,

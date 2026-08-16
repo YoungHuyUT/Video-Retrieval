@@ -173,6 +173,40 @@ Chỉ dùng khi chắc từ khóa có trong dữ liệu BTC; filter quá chặt 
 python -m aic2026.cli agent-query --query query_kis.json --backend faiss --metadata-filter "concert,outdoor" --output outputs/result_kis.json
 ```
 
+### Giới hạn theo tập dữ liệu (L25/L26)
+
+Hai luồng **KIS** và **Q&A** luôn tìm kiếm trên **TOÀN BỘ corpus** (không giới
+hạn split): KIS là retrieval nguyên video theo bản chất, còn Q&A đọc text OCR
+nằm rải rác khắp các tập. Retrieval KHÔNG bị scope.
+
+**TRAKE** cũng tìm trên toàn bộ corpus, nhưng **ưu tiên mềm (soft bias)** tập
+**L26** — tức là video L26 được cộng một điểm nhỏ để xếp trên các video tương
+đương không phải L26, nhưng KHÔNG bao giờ bị loại trừ các tập khác. Lý do: query
+event của BTC rất tổng quát (vd "bước vào phòng / ngồi xuống") và khớp nhiều
+split, còn L26 chủ yếu là nội dung nấu ăn/lifestyle — ép cứng TRAKE→L26 sẽ trả
+về **0 ứng viên** cho hầu hết query hành động. Ưu tiên mềm giữ được recall mà
+vẫn đẩy L26 lên khi nó thực sự khớp (đã kiểm chứng: query "cooking food" → 100%
+ứng viên L26).
+
+OCR thì ngược lại: **chỉ OCR trên L25** (khóa học online, nhiều bảng biểu/logo)
+để tiết kiệm thời gian máy — xem mục "Chỉ OCR một tập (ví dụ L25)" ở §6. Các
+video không khớp vẫn giữ nguyên trong manifest, thứ tự gốc bảo toàn nên
+`vector_id` khớp file `.npy`.
+
+Ghi đè ưu tiên L26 của TRAKE:
+
+```bat
+:: TRAKE ưu tiên L25 thay vì mặc định L26
+python -m aic2026.cli agent-query --query query_trake.json --backend faiss --trake-preferred-prefixes L25 --output outputs/result_trake.json
+
+:: Tắt ưu tiên (xét hết mọi tập, không thiên vị): truyền dấu chấm
+python -m aic2026.cli agent-query --query query_trake.json --backend faiss --trake-preferred-prefixes . --output outputs/result_trake.json
+```
+
+`--trake-preferred-prefixes` nhận nhiều tiền tố phẩy-ngăn-cách; để trống = dùng
+mặc định (ưu tiên L26), truyền `.` = không ưu tiên. KIS/Q&A không có flag scope
+vì luôn xét toàn bộ corpus.
+
 ## 6. OCR — tìm chữ trên biển/bảng/logo
 
 OCR không tự chạy và không nằm trong CLIP feature. Nó ghi text nhận dạng vào `object_labels` của manifest OCR để BM25 tìm khớp chính xác.
@@ -182,8 +216,9 @@ Cài PaddleOCR một lần:
 
 ```bat
 :: Cài PaddlePaddle CPU từ source Windows chính thức
-python -m pip install --force-reinstall paddlepaddle==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
-python -m pip install paddleocr
+python -m pip uninstall -y paddlepaddle paddleocr
+python -m pip install paddlepaddle==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+python -m pip install --upgrade paddleocr
 
 :: Phải in được version trước khi chạy OCR
 python -c "import paddle; print(paddle.__version__)"
@@ -215,6 +250,32 @@ python -m aic2026.cli ocr-manifest --manifest data/processed/official_manifest_o
 Lệnh trên **không ghi đè** `official_manifest.jsonl` gốc. CPU OCR toàn bộ
 177k keyframe có thể mất nhiều giờ. Nếu thiếu RAM, giảm `--batch-size 16`
 thành `--batch-size 8`.
+
+### Chỉ OCR một tập (ví dụ L25)
+
+OCR chủ yếu có giá trị trên tập **L25** (khóa học online, nhiều bảng biểu/logo),
+nên **chỉ OCR tập L25** để chạy nhanh và tiết kiệm. (TRAKE thì tìm toàn bộ
+corpus, chỉ ưu tiên mềm L26 — xem §5.) Dùng `--video-prefix L25` để **chỉ OCR**
+các video có `video_id` bắt đầu `L25` (88 video / 37.445 frames).
+
+> Các video **không** khớp (L26, L21, ...) vẫn được **giữ nguyên** trong file
+> output (không OCR, không drop), và thứ tự dòng manifest gốc được bảo toàn —
+> nên `vector_id` vẫn khớp file `official_features.npy`. TRAKE vẫn retrieval
+> bình thường trên toàn bộ corpus (gồm cả L26) sau khi OCR.
+
+```bat
+:: Chỉ OCR L25, hai lượt vi/en, gộp text vào cùng 1 manifest đầu ra
+python -m aic2026.cli ocr-manifest --manifest data/processed/official_manifest.jsonl --output data/processed/official_manifest_ocr_vi.jsonl --keyframes-root data/raw/Keyframes --video-prefix L25 --lang vi --batch-size 16
+
+python -m aic2026.cli ocr-manifest --manifest data/processed/official_manifest_ocr_vi.jsonl --output data/processed/official_manifest_ocr.jsonl --keyframes-root data/raw/Keyframes --video-prefix L25 --lang en --batch-size 16
+```
+
+Muốn OCR thêm một tập khác (vd L26) sau này, chạy tiếp `--video-prefix L26`
+ghi đè lên cùng file — text cũ của L25 được giữ (gộp không trùng).
+
+`--video-prefix` nhận nhiều tiền tố cách nhau dấu phẩy: `--video-prefix L25,L21`.
+Để trống = OCR hết (như hai lượt ở trên).
+
 
 OCR lưu tại:
 

@@ -26,6 +26,14 @@ class FakePipeline:
         # No metadata filter → return None so the agent considers all videos.
         return None
 
+    def prefixes_to_video_ids(
+        self,
+        prefixes: list[str] | None,
+        video_ids: set[str] | None = None,
+    ) -> set[str] | None:
+        # No prefix restriction → return None so the agent considers all videos.
+        return None
+
     def filter_videos_by_metadata(
         self,
         terms: list[str],
@@ -85,6 +93,7 @@ class FakePipeline:
         video_ids: set[str] | None = None,
         coarse_top_k: int = 200,
         object_adjustment=None,
+        preferred_prefixes: list[str] | None = None,
     ) -> list[Candidate]:
         assert event_embeddings.shape[0] == 3
         assert top_videos > 0

@@ -57,6 +57,12 @@ class RetrievalTools:
     # VLM.  It is deliberately bounded so CLIP remains the primary signal.
     colour_rerank_weight: float = 0.04
     contrastive_colour_rerank_weight: float = 0.06
+    # Restrict retrieval to a dataset split by video_id prefix (e.g. ``["L25"]``
+    # for QA on online-course videos, ``["L26"]`` for TRAKE). Optional; when set
+    # it is intersected with `video_filter_terms` (metadata) so both filters
+    # apply. ``None``/empty = no prefix restriction. The agent sets this per task
+    # (QA→L25, TRAKE→L26) before each retrieve call.
+    video_prefixes: list[str] | None = None
     video_filter_terms: list[str] | None = None
     # Số video tối đa giữ lại sau bước video-level coarse filter (KIS). Dataset
     # lớn (> số video này) thì chỉ top-K video theo video_score mới được giữ, còn
@@ -65,7 +71,19 @@ class RetrievalTools:
     coarse_top_k: int = 200
     # Coarse keyframes select the video; only its short event windows are then
     # decoded from the source video for finer TRAKE timestamps.
-    trake_dense_refine: bool = True
+    #
+    # Default is OFF for the official BTC corpus. The base TRAKE path already
+    # emits source-video frame coordinates: the manifest's `frame_id` is mapped
+    # from the official map-keyframes CSV (frame_idx gốc của video) inside
+    # `prepare-official`, so `event_frames` already land inside the ground-truth
+    # `ranges`. Enabling dense refinement re-encodes raw frames with a *different*
+    # CLIP embedding (open_clip ViT-B/32 vs the official BTC CLIP vectors used for
+    # retrieval) and re-runs DP; because the metric is `start <= frame <= end`
+    # (range, not exact), picking a nearby frame in the same scene that falls
+    # outside the range silently zeroes that event. It also adds the cost of
+    # decoding `.mp4` for up to `trake_refine_top_videos` videos. Keep off unless
+    # a dev set shows it helps for a specific reason.
+    trake_dense_refine: bool = False
     trake_refine_top_videos: int = 20
     trake_refine_sample_fps: float = 3.0
     trake_refine_window_seconds: float = 2.0
@@ -109,16 +127,25 @@ class RetrievalTools:
 
         # Metadata pre-filter: narrow the candidate video set before the
         # (relatively expensive) embedding/BM25 retrieval so frames from
-        # off-topic videos never enter the pool.
+        # off-topic videos never enter the pool.  Combined with the optional
+        # `video_prefixes` split restriction (e.g. QA→L25): intersection means
+        # a video must satisfy BOTH filters to stay in the pool.
         allowed_video_ids = self.pipeline.filter_terms_to_video_ids(
             self.video_filter_terms or []
         )
+        if self.video_prefixes:
+            prefix_ids = self.pipeline.prefixes_to_video_ids(
+                self.video_prefixes, allowed_video_ids
+            )
+            if prefix_ids is not None:
+                allowed_video_ids = prefix_ids
         if allowed_video_ids is not None:
             logger.info(
-                "metadata filter: %d/%d videos matched (%s)",
+                "video pool after filters: %d/%d videos (%s)%s",
                 len(allowed_video_ids),
                 len({record.video_id for record in self.pipeline.manifest}),
                 ", ".join(sorted(allowed_video_ids))[:200],
+                f" prefixes={self.video_prefixes}" if self.video_prefixes else "",
             )
 
         if self.bm25_index is not None and self.bm25_index.is_empty:
@@ -259,6 +286,20 @@ class RetrievalTools:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("late-interaction rerank skipped: %s", exc)
 
+        # KIS is video-level: a single high-scoring outlier frame must not lift
+        # the wrong video. Aggregate each video's strongest frames into one
+        # video_score (log-sum-exp), keep the top videos, and re-emit frames
+        # ordered by that video-aware score — so a video with *consistently*
+        # good frames rises above a lone-outlier video, and we still surface
+        # other strong videos instead of spamming frames from one. QA/TRAKE
+        # keep the raw pool (multiple frames per video are meaningful there).
+        if task_type == "kis":
+            top_videos = self.coarse_top_k if self.coarse_top_k and self.coarse_top_k > 0 else None
+            candidates = self.pipeline.video_level_rerank(
+                candidates,
+                top_videos=top_videos,
+            )
+
         return candidates
 
     def _record_lookup(self) -> dict[int, FrameRecord]:
@@ -279,6 +320,12 @@ class RetrievalTools:
         prefilter_frames_per_event: int = 500,
         penalty_weight: float = 0.005,
         coarse_top_k: int = 200,
+        # Soft *preference* (not a hard restriction) for certain video_id
+        # prefixes (e.g. ["L26"]). Preferred videos get a small bounded score
+        # nudge so they rank above equally-similar non-preferred videos, but a
+        # non-preferred video is never dropped — BTC event queries are generic
+        # and match many splits, so a hard restrict would zero recall.
+        preferred_prefixes: list[str] | None = None,
     ) -> list[Candidate]:
         """Run deterministic event-wise TRAKE retrieval and alignment.
 
@@ -316,9 +363,17 @@ class RetrievalTools:
 
         # Metadata pre-filter (TRAKE): restrict candidate videos before the
         # per-event vector scan inside retrieve_trake (pushed down to the DB).
+        # Combined with the optional `video_prefixes` split restriction so a
+        # video must satisfy BOTH to stay in the pool.
         allowed_video_ids = self.pipeline.filter_terms_to_video_ids(
             self.video_filter_terms or []
         )
+        if self.video_prefixes:
+            prefix_ids = self.pipeline.prefixes_to_video_ids(
+                self.video_prefixes, allowed_video_ids
+            )
+            if prefix_ids is not None:
+                allowed_video_ids = prefix_ids
 
         # Unit-test/lightweight pipelines may not expose manifest records.  The
         # production pipeline always does; in that case apply evidence inside
@@ -340,6 +395,7 @@ class RetrievalTools:
             video_ids=allowed_video_ids,
             coarse_top_k=coarse_top_k,
             object_adjustment=object_adjustment,
+            preferred_prefixes=preferred_prefixes,
         )
 
         # Safety net for any candidate the DB filter could not exclude.

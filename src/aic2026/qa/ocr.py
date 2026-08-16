@@ -2,10 +2,70 @@ from __future__ import annotations
 
 import logging
 import json
+import os
+import sys
 from collections.abc import Mapping
+from contextlib import contextmanager
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _suppress_paddle_stderr():
+    """Hide Paddle's raw C++ stderr noise (e.g. ``ReduceMeanCheckIfOneDNNSupport``).
+
+    That line is printed straight to the C-level stderr stream by Paddle's OneDNN
+    backend, so env vars like ``GLOG_minloglevel`` cannot suppress it. We redirect
+    the OS file descriptor 2 to a pipe, drain it in a background thread, and
+    restore it on exit. Only active on the non-Windows (fileno) path; on Windows
+    (no usable fileno) we silently skip so behaviour is unchanged.
+    """
+    raw_stderr = getattr(sys.stderr, "fileno", None)
+    if raw_stderr is None or not hasattr(sys.stderr, "fileno"):
+        yield
+        return
+    try:
+        fd = sys.stderr.fileno()
+    except (OSError, ValueError):
+        yield
+        return
+
+    old_fd = os.dup(fd)
+    pipe_r, pipe_w = os.pipe()
+    os.dup2(pipe_w, fd)
+
+    import threading
+
+    stop = threading.Event()
+
+    def _drain():
+        try:
+            while not stop.is_set():
+                try:
+                    chunk = os.read(pipe_r, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                # Discard — these are Paddle C++ diagnostic lines, not user output.
+        finally:
+            try:
+                os.close(pipe_r)
+            except OSError:
+                pass
+
+    t = threading.Thread(target=_drain, daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        sys.stderr.flush()
+        os.dup2(old_fd, fd)
+        os.close(old_fd)
+        os.close(pipe_w)
+        stop.set()
+        t.join(timeout=1.0)
 
 
 class OCRTextExtractor:
@@ -17,8 +77,9 @@ class OCRTextExtractor:
     that CLIP cannot read.
     """
 
-    def __init__(self, lang: str = "vi", **paddle_kwargs: object) -> None:
+    def __init__(self, lang: str = "vi", model_size: str = "medium", **paddle_kwargs: object) -> None:
         self.lang = lang
+        self.model_size = model_size
         # Keyframes are ordinary video frames, not scanned documents. PaddleOCR
         # v3 enables three document-preprocessing models by default; they add
         # several downloads and substantial RAM use but do not help normal
@@ -29,6 +90,13 @@ class OCRTextExtractor:
             "use_textline_orientation": False,
             **paddle_kwargs,
         }
+        # PP-OCRv6 ships both a `medium` (default, accurate) and a `mobile`
+        # (3–5x faster, slightly less accurate) recognizer/detector. Pass the
+        # mobile checkpoint names only when explicitly requested so the default
+        # path is unchanged and never breaks.
+        if model_size == "mobile":
+            self._paddle_kwargs["det_model_name"] = "PP-OCRv6_mobile_det"
+            self._paddle_kwargs["rec_model_name"] = "PP-OCRv6_mobile_rec"
         self._ocr = None
         self._load_failed: bool = False
 
@@ -40,6 +108,11 @@ class OCRTextExtractor:
             # restricted/offline environments that probe is slow and can fail
             # before the actual OCR models are initialized.
             import os
+
+            # Quiet Paddle's glog-level diagnostics. The raw C++ OneDNN stderr
+            # noise (ReduceMeanCheckIfOneDNNSupport) is filtered separately at the
+            # file-descriptor level during inference (_suppress_paddle_stderr).
+            os.environ.setdefault("GLOG_minloglevel", "3")
             os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
             from paddleocr import PaddleOCR
         except ImportError as exc:
@@ -67,9 +140,13 @@ class OCRTextExtractor:
             # ``rec_texts``. The former 2.x ``ocr`` output is a nested list of
             # [box, (text, confidence)]. Supporting both avoids silently
             # writing an unchanged manifest when PaddleOCR is upgraded.
+            with _suppress_paddle_stderr():
+                if hasattr(self._ocr, "predict"):
+                    result = self._ocr.predict(str(frame_path))
+                else:
+                    result = self._ocr.ocr(str(frame_path), cls=True)
             if hasattr(self._ocr, "predict"):
-                return self._extract_v3(self._ocr.predict(str(frame_path)))
-            result = self._ocr.ocr(str(frame_path), cls=True)
+                return self._extract_v3(result)
         except Exception as exc:  # noqa: BLE001 — a bad frame must not abort a batch
             logger.debug("OCRTextExtractor: error on %s: %s", frame_path, exc)
             return []
@@ -150,7 +227,10 @@ class OCRTextExtractor:
             chunk = frame_paths[start : start + batch_size]
             if hasattr(self._ocr, "predict"):
                 try:
-                    pages = list(self._ocr.predict([str(path) for path in chunk]))
+                    # Suppress Paddle's raw C++ stderr (ReduceMeanCheckIfOneDNNSupport,
+                    # oneDNN noise) during the actual inference call.
+                    with _suppress_paddle_stderr():
+                        pages = list(self._ocr.predict([str(path) for path in chunk]))
                     if len(pages) != len(chunk):
                         raise RuntimeError(
                             f"PaddleOCR returned {len(pages)} results for {len(chunk)} inputs"

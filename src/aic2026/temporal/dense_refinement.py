@@ -25,6 +25,11 @@ def _window_frame_ids(
         start = max(0, int(center) - radius)
         end = min(frame_count - 1, int(center) + radius)
         selected.update(range(start, end + 1, stride))
+        # Always include the window boundaries so a window that reaches the
+        # video edge (or lands between strided samples) still covers its full
+        # [start, end] extent instead of stopping short at the last on-grid frame.
+        selected.add(start)
+        selected.add(end)
         selected.add(min(max(0, int(center)), frame_count - 1))
     return sorted(selected)
 

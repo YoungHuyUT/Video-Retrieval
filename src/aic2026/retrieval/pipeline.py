@@ -257,6 +257,37 @@ class RetrievalPipeline:
         matched = self.filter_videos_by_metadata(terms, video_ids)
         return set(matched)
 
+    def prefixes_to_video_ids(
+        self,
+        prefixes: list[str] | None,
+        video_ids: set[str] | None = None,
+    ) -> set[str] | None:
+        """Resolve ``video_id`` prefixes to an allowed video set (or None = no filter).
+
+        Used to restrict a retrieval task to a specific dataset split (e.g. QA
+        focuses on ``L25`` online-course videos, TRAKE on ``L26``). Returns
+        ``None`` when *prefixes* is empty so callers can skip masking; when a
+        base ``video_ids`` set is supplied the two are intersected so a prefix
+        can further narrow a metadata-derived pool.
+        """
+
+        if not prefixes:
+            return None
+        manifest = getattr(self, "manifest", None)
+        if not manifest:
+            return None
+        wanted = set(prefixes)
+        matched = {
+            record.video_id
+            for record in manifest
+            if any(
+                record.video_id.startswith(prefix) for prefix in wanted
+            )
+        }
+        if video_ids is not None:
+            matched &= set(video_ids)
+        return matched
+
     def _build_video_manifest_index(
         self,
     ) -> dict[str, np.ndarray]:
@@ -490,6 +521,12 @@ class RetrievalPipeline:
         video_ids: set[str] | None = None,
         coarse_top_k: int = 200,
         object_adjustment: Callable[[int, int], float] | None = None,
+        # Soft *preference* (NOT a restriction) for certain video_id prefixes
+        # (e.g. ["L26"]). Preferred videos get a small bounded score nudge so they
+        # rank above equally-similar non-preferred videos, but a non-preferred
+        # video is never dropped. BTC event queries are generic and match many
+        # splits, so a hard restrict would zero recall — this only biases ranking.
+        preferred_prefixes: list[str] | None = None,
     ) -> list[Candidate]:
         """Rank videos and align one ordered frame to each event.
 
@@ -683,6 +720,19 @@ class RetrievalPipeline:
                     event_frames=event_frames,
                 )
             )
+
+        # Soft preference nudge (NOT a restriction): preferred-prefix videos get
+        # a small bounded bonus so they rise above equally-similar non-preferred
+        # videos without ever suppressing a non-preferred match. Alignment scores
+        # sit ~0.2-0.4, so a 0.02 bonus is enough to break ties without reversing
+        # a genuinely better non-preferred video.
+        if preferred_prefixes:
+            wanted = set(preferred_prefixes)
+            for candidate in ranked_candidates:
+                if any(
+                    candidate.video_id.startswith(p) for p in wanted
+                ):
+                    candidate.score += 0.02
 
         ranked_candidates.sort(
             key=lambda candidate: (

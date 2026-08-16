@@ -150,7 +150,21 @@ def prepare_official(
     output_features: Path = typer.Option(Path("data/processed/official_features.npy")),
 ) -> None:
     """Build manifest + aligned .npy từ CLIP features BTC chính thức (thứ tự khớp keyframe)."""
+    from aic2026.data_platform import inspect_official_assets
     from aic2026.ingestion.official_index import build_official_index
+    # Fail fast if the map-keyframes CSV (nguồn frame_idx gốc của video) is
+    # missing. Without it, `build_official_index` silently falls back to keyframe
+    # ordinal as `frame_id`, and TRAKE would then emit out-of-range frames versus
+    # the BTC ground-truth `ranges`. BTC Metadata for this corpus does not carry
+    # `frame_indices` (verified on L21_V001), so the CSV is the only source of
+    # correct coordinates. This guard prevents building a subtly-wrong manifest.
+    assets = inspect_official_assets(raw_dir)
+    if assets.map_keyframes is None:
+        raise typer.BadParameter(
+            "Không tìm thấy thư mục map-keyframes (CSV frame_idx gốc). "
+            "TRAKE cần tọa độ frame gốc; thiếu CSV sẽ sinh manifest sai tọa độ. "
+            "Hãy giải nén ZIP hỗ trợ BTC vào data/raw (vd map-keyframes-aic25-b1)."
+        )
     count = build_official_index(raw_dir, features, output_manifest, output_features)
     typer.echo(f"Wrote {count} records to {output_manifest} and {output_features}")
 
@@ -266,67 +280,50 @@ def build_chroma_index(
     )
 
 
-@app.command("ocr-manifest")
-def ocr_manifest(
-    manifest: Path = typer.Option(Path("data/processed/derived_manifest.jsonl"), help="Manifest JSONL input"),
-    output: Path | None = typer.Option(None, help="Manifest JSONL output. Mặc định ghi đè (in-place) vào --manifest để agent-query tự dùng."),
-    keyframes_root: Path = typer.Option(Path("data/raw/Keyframes"), help="Gốc chứa thư mục keyframe để resolve đường dẫn tương đối"),
-    batch_size: int = typer.Option(16, min=1),
-    lang: str = typer.Option("vi", help="Ngôn ngữ OCR: vi | en"),
-) -> None:
-    """OCR toàn bộ keyframe trong manifest, ghi text nhận dạng vào object_labels (build 1 lần).
+def _resolve_keyframe_path(record: object, keyframes_root: Path) -> Path | None:
+    """Find the keyframe JPG for a record, trying absolute + two relative layouts."""
+    candidates = [
+        Path(record.keyframe_path),
+        keyframes_root / record.video_id / Path(record.keyframe_path).name,
+        keyframes_root / record.keyframe_path,
+    ]
+    return next((c for c in candidates if c.exists()), None)
 
-    Mặc định ghi đè vào chính file --manifest (in-place) để bước agent-query /
-    build-chroma-index / BM25 index tự động hưởng lợi từ text OCR. Dùng --output
-    để ghi file riêng (không đụng manifest gốc).
+
+def _run_ocr(
+    records: list,
+    extractor: object,
+    keyframes_root: Path,
+    batch_size: int,
+    progress_label: str = "OCR keyframes",
+) -> tuple[list, int, int]:
+    """OCR a list of FrameRecords, merging recognized text into object_labels.
+
+    Returns (enriched_records, found_images, recognized_lines). The progress bar
+    is intentionally plain (no ETA) because the first batches are dominated by
+    Paddle/MKLDNN warmup, which would otherwise show a wildly wrong ETA like
+    "1504d". ETA appears and stabilizes after warmup.
     """
-    from aic2026.ingestion import load_manifest
     from aic2026.models import FrameRecord
-    from aic2026.qa.ocr import OCRTextExtractor
-
-    records = load_manifest(manifest)
-    extractor = OCRTextExtractor(lang=lang)
-    extractor._ensure_loaded()
-    if extractor._ocr is None:
-        typer.echo(
-            "PaddleOCR không khởi động được — xem warning phía trên. "
-            "Nếu có libpaddle.pyd/DLL load failed, sửa PaddlePaddle/Visual C++ runtime trước."
-        )
-        raise typer.Exit(code=1)
 
     enriched: list[FrameRecord] = []
     total = len(records)
     found_images = 0
     recognized_lines = 0
-    typer.echo(
-        f"OCR bắt đầu: {total:,} manifest records | lang={lang}"
-    )
-    # Click/Typer render một progress bar thật trong cmd/PowerShell, thay vì
-    # in hàng trăm dòng log. Các counter chi tiết được in ở summary cuối.
-    with typer.progressbar(
-        length=total,
-        label="OCR keyframes",
-        show_percent=True,
-        show_pos=True,
-    ) as progress:
+    typer.echo(f"OCR bắt đầu: {total:,} manifest records | lang={extractor.lang} | model={extractor.model_size}")
+    with typer.progressbar(length=total, label=progress_label, show_percent=True, show_pos=True) as progress:
         for start in range(0, total, batch_size):
             record_batch = records[start : start + batch_size]
             resolved: list[Path | None] = []
             image_paths: list[Path] = []
             for record in record_batch:
-                # keyframe_path có thể là đường dẫn đầy đủ hoặc tương đối.
-                candidates = [
-                    Path(record.keyframe_path),
-                    keyframes_root / record.video_id / Path(record.keyframe_path).name,
-                    keyframes_root / record.keyframe_path,
-                ]
-                chosen = next((candidate for candidate in candidates if candidate.exists()), None)
+                chosen = _resolve_keyframe_path(record, keyframes_root)
                 resolved.append(chosen)
                 if chosen is not None:
                     image_paths.append(chosen)
 
-            # Một lần Paddle inference cho cả batch ảnh có tồn tại; những record
-            # thiếu JPG vẫn giữ nguyên object_labels và chỉ cập nhật progress.
+            # One Paddle inference pass for all present images in the batch;
+            # records missing a JPG keep their labels and just advance progress.
             batch_texts = extractor.extract_many(image_paths, batch_size=batch_size)
             text_iter = iter(batch_texts)
             for record, chosen in zip(record_batch, resolved):
@@ -337,11 +334,113 @@ def ocr_manifest(
                 merged = list(dict.fromkeys([*(record.object_labels or []), *texts]))
                 enriched.append(record.model_copy(update={"object_labels": merged}))
                 progress.update(1)
+    return enriched, found_images, recognized_lines
+
+
+@app.command("ocr-manifest")
+def ocr_manifest(
+    manifest: Path = typer.Option(Path("data/processed/derived_manifest.jsonl"), help="Manifest JSONL input"),
+    output: Path | None = typer.Option(None, help="Manifest JSONL output. Mặc định ghi đè (in-place) vào --manifest để agent-query tự dùng."),
+    keyframes_root: Path = typer.Option(Path("data/raw/Keyframes"), help="Gốc chứa thư mục keyframe để resolve đường dẫn tương đối"),
+    batch_size: int = typer.Option(16, min=1),
+    lang: str = typer.Option("vi", help="Ngôn ngữ OCR: vi | en"),
+    model_size: str = typer.Option("medium", help="PP-OCRv6 checkpoint: medium (chuẩn, chính xác) | mobile (nhanh 3–5x, hơi kém chính xác)"),
+    shard_count: int = typer.Option(1, min=1, help="Chia manifest thành N shard để chạy song song nhiều process (CPU). Dùng cùng --shard-id."),
+    shard_id: int = typer.Option(0, min=0, help="Shard thứ i (0-based) khi chạy song song. Bình thường = 0."),
+    video_prefix: str = typer.Option("", help="CHỈ OCR các video có tiền tố video_id này (vd: L25 — khóa học onl có bảng biểu). Để trống = OCR hết. Các video KHÔNG khớp vẫn được ghi nguyên vào output (không OCR, không drop)."),
+) -> None:
+    """OCR toàn bộ keyframe trong manifest, ghi text nhận dạng vào object_labels (build 1 lần).
+
+    Mặc định ghi đè vào chính file --manifest (in-place) để bước agent-query /
+    build-chroma-index / BM25 index tự động hưởng lợi từ text OCR. Dùng --output
+    để ghi file riêng (không đụng manifest gốc).
+
+    Song song hóa (CPU): chia manifest thành N phần bằng --shard-count N, rồi chạy
+    N process đồng thời (mỗi process 1 --shard-id 0..N-1), mỗi process ghi file
+    ``<output>.<shard_id>``. Sau khi N process xong, gộp bằng ``ocr-merge-shards``.
+    Ví dụ trên máy 8 nhân: --shard-count 8, chạy 8 terminal/lệnh song song.
+    """
+    if shard_count > 1 and output is None:
+        typer.echo("--shard-count > 1 yêu cầu --output (để ghi từng shard riêng, không ghi đè manifest).")
+        raise typer.Exit(code=1)
+    if shard_id >= shard_count:
+        typer.echo(f"--shard-id {shard_id} phải nhỏ hơn --shard-count {shard_count}.")
+        raise typer.Exit(code=1)
+
+    from aic2026.ingestion import load_manifest
+    from aic2026.qa.ocr import OCRTextExtractor
+
+    records = load_manifest(manifest)
+    if shard_count > 1:
+        # Chia đều, shard cuối hứng phần dư (nếu có).
+        chunk = (len(records) + shard_count - 1) // shard_count
+        records = records[shard_id * chunk : (shard_id + 1) * chunk]
+        progress_label = f"OCR shard {shard_id + 1}/{shard_count}"
+    else:
+        progress_label = "OCR keyframes"
+
+    if not records:
+        typer.echo(f"Shard {shard_id} rỗng — không có record nào.")
+        raise typer.Exit(code=0)
+
+    # --video-prefix: CHỈ OCR các video khớp tiền tố (vd L25 — khóa học onl có
+    # bảng biểu). Các video KHÔNG khớp vẫn được giữ nguyên trong output (không
+    # OCR, không drop) để manifest đầy đủ cho retrieval các task khác (TRAKE→L26).
+    ocr_prefixes = [p.strip() for p in video_prefix.split(",") if p.strip()]
+    if ocr_prefixes:
+        ocr_records = [
+            r for r in records
+            if any(r.video_id.startswith(p) for p in ocr_prefixes)
+        ]
+        passthrough = [
+            r for r in records
+            if not any(r.video_id.startswith(p) for p in ocr_prefixes)
+        ]
+        typer.echo(
+            f"--video-prefix {ocr_prefixes}: OCR {len(ocr_records):,} / {len(records):,} "
+            f"records khớp; {len(passthrough):,} records còn lại giữ nguyên (không OCR)."
+        )
+    else:
+        ocr_records = records
+        passthrough = []
+
+    extractor = OCRTextExtractor(lang=lang, model_size=model_size)
+    extractor._ensure_loaded()
+    if extractor._ocr is None:
+        typer.echo(
+            "PaddleOCR không khởi động được — xem warning phía trên. "
+            "Nếu có libpaddle.pyd/DLL load failed, sửa PaddlePaddle/Visual C++ runtime trước."
+        )
+        raise typer.Exit(code=1)
+
+    ocr_enriched, found_images, recognized_lines = _run_ocr(
+        ocr_records, extractor, keyframes_root, batch_size, progress_label=progress_label
+    )
+    # Gộp toàn bộ: GIỮ NGUYÊN thứ tự manifest gốc. vector_id của mỗi record phải
+    # khớp với dòng thứ tự tương ứng trong file feature .npy (được build theo
+    # đúng thứ tự manifest), nên ta không được xáo trộn thứ tự. Record khớp
+    # --video-prefix dùng bản đã OCR; record còn lại giữ nguyên (không OCR).
+    if passthrough:
+        enriched_by_id = {r.vector_id: r for r in ocr_enriched}
+        enriched = [
+            enriched_by_id.get(record.vector_id, record)
+            for record in records
+        ]
+    else:
+        enriched = ocr_enriched
 
     target = output if output is not None else manifest
+    if shard_count > 1:
+        # Mỗi shard ghi file riêng để không đè lên nhau; gộp sau bằng ocr-merge-shards.
+        target = output.with_suffix(f".shard{shard_id}{output.suffix}")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("\n".join(r.model_dump_json() for r in enriched) + ("\n" if enriched else ""), encoding="utf-8")
-    if output is None:
+    if shard_count > 1:
+        typer.echo(
+            f"OCR shard {shard_id} xong: wrote {len(enriched):,} records to {target} "
+            f"| images={found_images:,} | text-lines={recognized_lines:,}"
+        )
+    elif output is None:
         typer.echo(
             f"OCR hoàn tất: wrote {len(enriched):,} records IN-PLACE to {target} "
             f"| images={found_images:,} | text-lines={recognized_lines:,}"
@@ -351,6 +450,34 @@ def ocr_manifest(
             f"OCR hoàn tất: wrote {len(enriched):,} records to {target} "
             f"| images={found_images:,} | text-lines={recognized_lines:,}"
         )
+
+
+@app.command("ocr-merge-shards")
+def ocr_merge_shards(
+    output: Path = typer.Option(..., help="File manifest gộp đầu ra (ví dụ: official_manifest_ocr_vi.jsonl)"),
+    shard_glob: str = typer.Option("data/processed/official_manifest_ocr_vi.jsonl.shard*.jsonl", help="Glob các file shard đã sinh bởi ocr-manifest --shard-count"),
+) -> None:
+    """Gộp các file shard do ``ocr-manifest --shard-count N`` sinh ra thành 1 manifest.
+
+    Chạy SAU khi tất cả N process song song đã xong. Thứ tự record được giữ theo
+    tên shard (shard0 trước, shard1 sau, ...), khớp với thứ tự manifest gốc.
+    """
+    from pathlib import Path as _Path
+
+    shards = sorted(_Path(p) for p in __import__("glob").glob(shard_glob))
+    if not shards:
+        typer.echo(f"Không tìm thấy shard nào khớp glob: {shard_glob}")
+        raise typer.Exit(code=1)
+    total = 0
+    lines: list[str] = []
+    for shard in shards:
+        text = shard.read_text(encoding="utf-8")
+        kept = [ln for ln in text.splitlines() if ln.strip()]
+        lines.extend(kept)
+        total += len(kept)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    typer.echo(f"Gộp {len(shards)} shard → {total:,} records vào {output}")
 
 
 @app.command("agent-query")
@@ -370,6 +497,7 @@ def agent_query(
     vlm_dtype: str = typer.Option("bfloat16", help="Precision VLM khi backend=transformers: bfloat16 | float16 | float32"),
     vlm_timeout: int = typer.Option(120, help="Timeout (giây) mỗi lần gọi VLM qua Ollama (backend=ollama)"),
     coarse_top_k: int = typer.Option(200, help="TRAKE: giới hạn số video đưa vào DP alignment (coarse filter). 0 = xét hết."),
+    trake_preferred_prefixes: str = typer.Option("", help="Ưu tiên (soft bias, KHÔNG loại trừ) TRAKE vào tiền tố video_id, cách nhau dấu phẩy (vd: L26). KIS/Q&A luôn xét TOÀN BỘ video. Để trống = mặc định ưu tiên L26. Truyền '.' để tắt ưu tiên."),
     translate: bool = typer.Option(False, help="Dịch VI→EN trước khi retrieval (CLIP là tiếng Anh). Mặc định tắt: dùng query nguyên bản."),
     output: Path | None = typer.Option(None),
 ) -> None:
@@ -407,6 +535,14 @@ def agent_query(
     tools.bm25_index = BM25Index(manifest_records)
     # Metadata pre-filter: chỉ retrieve trong các video có chứa từ khóa.
     tools.video_filter_terms = [t.strip() for t in metadata_filter.split(",") if t.strip()] or None
+    # TRAKE soft preference: "." disables the default L26 bias; empty uses the
+    # agent's built-in default (L26); otherwise split on commas into the
+    # explicit preferred-prefix list. KIS/Q&A are intentionally never scoped —
+    # they search the full corpus.
+    def _parse_prefixes(raw: str) -> list[str] | None:
+        if raw == ".":
+            return None
+        return [p.strip() for p in raw.split(",") if p.strip()] or None
     if parsed_query.type == "qa" and vlm_backend != "none" and vlm_model:
         if vlm_backend == "ollama":
             from aic2026.qa.vlm_ollama import OllamaVisionModel
@@ -430,6 +566,7 @@ def agent_query(
     agent = RetrievalAgent(
         tools,
         llm=OllamaLLM(model=llm_model, base_url=ollama_url, timeout_seconds=llm_timeout),
+        trake_preferred_prefixes=_parse_prefixes(trake_preferred_prefixes),
     )
     agent.coarse_top_k = coarse_top_k
     agent.translate = translate
