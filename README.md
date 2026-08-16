@@ -182,8 +182,9 @@ Cài PaddleOCR một lần:
 
 ```bat
 :: Cài PaddlePaddle CPU từ source Windows chính thức
-python -m pip install --force-reinstall paddlepaddle==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
-python -m pip install paddleocr
+python -m pip uninstall -y paddlepaddle paddleocr
+python -m pip install paddlepaddle==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+python -m pip install --upgrade paddleocr
 
 :: Phải in được version trước khi chạy OCR
 python -c "import paddle; print(paddle.__version__)"
