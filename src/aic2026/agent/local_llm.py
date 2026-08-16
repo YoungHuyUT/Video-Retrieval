@@ -1,10 +1,60 @@
 from __future__ import annotations
 
+import re
 from typing import Protocol, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
 T = TypeVar("T", bound=BaseModel)
+
+# Các model reasoning (qwen3/qwen3.5, deepseek-r1, ...) thường bọc kết quả trong
+# thẻ <think>…</think>; một số model khác lại bọc JSON trong markdown ```json … ```.
+# Ollama đôi khi cũng thêm text tản mạn trước/ Sau JSON. Hàm dưới bóc các lớp đó
+# để lấy được chuỗi JSON hợp lệ đưa vào pydantic.
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_to_json(content: str) -> str:
+    """Trích xuất chuỗi JSON từ nội dung trả về của LLM, bất kể có nhiễu.
+
+    Xử lý lần lượt: bỏ thẻ <think>, bỏ markdown code fence, rồi tìm cặp dấu
+    ngoặc nhọn ``{…}`` đầu tiên. Nếu vẫn không được, trả nguyên bản để pydantic
+    báo lỗi rõ ràng.
+    """
+    text = content.strip()
+
+    text = _THINK_RE.sub("", text)
+
+    fence = _FENCE_RE.search(text)
+    if fence:
+        text = fence.group(1).strip()
+
+    # Tìm object JSON đầu tiên theo dấu ngoặc cân bằng.
+    start = text.find("{")
+    if start != -1:
+        depth = 0
+        in_str = False
+        escape = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+            else:
+                if ch == '"':
+                    in_str = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start : idx + 1]
+    return text.strip()
 
 
 class LLMInvocationError(RuntimeError):
@@ -59,9 +109,7 @@ class OllamaLLM:
         payload = {
             "model": self.model,
             "stream": False,
-            "format": schema.model_json_schema(),
             "think": self.think,
-            "keep_alive": self.keep_alive,
             "options": {
                 "temperature": self.temperature,
                 "num_predict": self.num_predict,
@@ -101,10 +149,11 @@ class OllamaLLM:
             ) from exc
 
         try:
-            return schema.model_validate_json(content)
+            parsed = _strip_to_json(content)
+            return schema.model_validate_json(parsed)
 
         except ValidationError as exc:
             raise LLMInvocationError(
                 f"The local LLM returned invalid "
-                f"{schema.__name__} JSON."
+                f"{schema.__name__} JSON: {content!r}"
             ) from exc

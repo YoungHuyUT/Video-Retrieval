@@ -1,19 +1,27 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-import logging
 import numpy as np
 
 from aic2026.models import Candidate, FrameRecord
 
 logger = logging.getLogger(__name__)
-from aic2026.reranking import rerank_with_metadata
+from aic2026.reranking import (
+    late_interaction_rerank,
+    contrastive_clip_colour_rerank,
+    rerank_with_colour_evidence,
+    object_evidence_adjustment,
+    rerank_with_metadata,
+    rerank_with_object_evidence,
+)
 from aic2026.retrieval import RetrievalPipeline
-from aic2026.temporal import align_events
+from aic2026.temporal import align_events, refine_trake_candidates
 
 if TYPE_CHECKING:
     from aic2026.retrieval.bm25_index import BM25Index
@@ -26,7 +34,6 @@ _TASKS_REQUIRING_DENSE_VIDEO_EVIDENCE = frozenset(
     }
 )
 
-
 @dataclass
 class RetrievalTools:
     """The agent's controlled interface to competition evidence."""
@@ -36,14 +43,38 @@ class RetrievalTools:
     visual_answerer: (
         Callable[[str, list[Candidate]], dict[int, str]] | None
     ) = None
+    encode_images: Callable[[list[object]], np.ndarray] | None = None
     bm25_index: BM25Index | None = None
-    rerank_weight: float = 0.05
+    # Trọng số metadata bonus (Direction B): nhỏ, cộng trực tiếp lên RRF gốc
+    # (KHÔNG normalize). RRF base ~0.01-0.03; weight 0.01 → bonus tối đa +0.01,
+    # đủ nudging mà không đảo ngược thứ tự RRF.
+    rerank_weight: float = 0.01
+    # Trọng số late-interaction (ColBERT-style MaxSim): encode_text ~200 lần trong
+    # retrieve(), RẤT nặng cho thi tốc độ. Mặc định 0.0 (TẮT) — chỉ bật nếu cần
+    # tăng recall query dài nhiều từ (rare cho BTC). Có thể bật qua runtime config.
+    late_interaction_weight: float = 0.0
+    # HSV colour evidence reads only the top image candidates and never calls a
+    # VLM.  It is deliberately bounded so CLIP remains the primary signal.
+    colour_rerank_weight: float = 0.04
+    contrastive_colour_rerank_weight: float = 0.06
     video_filter_terms: list[str] | None = None
     # Số video tối đa giữ lại sau bước video-level coarse filter (KIS). Dataset
     # lớn (> số video này) thì chỉ top-K video theo video_score mới được giữ, còn
     # lại loại bỏ trước khi vào MMR — tránh video nhiễu (1 frame outlier) lọt top.
     # 0 / <= 0 hoặc >= số video = xét hết (backward-compatible, dataset nhỏ).
     coarse_top_k: int = 200
+    # Coarse keyframes select the video; only its short event windows are then
+    # decoded from the source video for finer TRAKE timestamps.
+    trake_dense_refine: bool = True
+    trake_refine_top_videos: int = 20
+    trake_refine_sample_fps: float = 3.0
+    trake_refine_window_seconds: float = 2.0
+    trake_video_root: Path = Path("data/raw/Videos")
+
+    @property
+    def has_lexical_objects(self) -> bool:
+        """Whether a frame-level objects/OCR BM25 index is available."""
+        return self.bm25_index is not None and not self.bm25_index.is_empty
 
     def retrieve(
         self,
@@ -91,37 +122,37 @@ class RetrievalTools:
             )
 
         if self.bm25_index is not None and self.bm25_index.is_empty:
-            logger.debug(
+            logger.warning(
                 "BM25 skipped: manifest has no Objects/Metadata text. "
                 "Run `aic2026 prepare` to load them for lexical retrieval."
             )
 
+        # Bound the retrieval work to the requested candidate pool.  A global
+        # per-video scan is disproportionately expensive for a static CLIP index.
+        pool = limit
+
         if self.bm25_index is not None and not self.bm25_index.is_empty:
             logger.debug("BM25 lexical index active; fusing with vector retrieval.")
-            # Hybrid path: RRF fuses vector + BM25. Push the video filter down
-            # to the vector tier where possible; the Python mask is the safety
-            # net for any candidate the DB filter could not exclude.
             if requires_dense_evidence:
                 candidates = self.pipeline.hybrid_retrieve_raw(
                     text_query=queries[0],
                     text_embedding=embeddings[0],
                     bm25_index=self.bm25_index,
-                    top_frames=limit,
+                    top_frames=pool,
                     video_ids=allowed_video_ids,
                 )
             else:
-                candidates = self.pipeline.hybrid_retrieve(
+                candidates = self.pipeline.hybrid_retrieve_raw(
                     text_query=queries[0],
                     text_embedding=embeddings[0],
                     bm25_index=self.bm25_index,
-                    top_frames=limit,
-                    max_answers=limit,
+                    top_frames=pool,
                     video_ids=allowed_video_ids,
                 )
         elif requires_dense_evidence:
             candidates = self.pipeline.retrieve_raw(
                 text_embedding=embeddings[0],
-                top_frames=limit,
+                top_frames=pool,
                 video_ids=allowed_video_ids,
             )
         elif len(embeddings) > 1:
@@ -129,16 +160,15 @@ class RetrievalTools:
             ranked_lists = []
             for emb in embeddings:
                 ids, _ = self.pipeline.search_with_filter(
-                    emb, limit, allowed_video_ids
+                    emb, pool, allowed_video_ids
                 )
                 ranked_lists.append(np.asarray(ids, dtype=np.int64))
             fused = self.pipeline._rrf_fuse(ranked_lists)
             candidates = self.pipeline._candidates_from_scores(fused, limit=limit)
         else:
-            candidates = self.pipeline.retrieve(
+            candidates = self.pipeline.retrieve_raw(
                 text_embedding=embeddings[0],
-                top_frames=limit,
-                max_answers=limit,
+                top_frames=pool,
                 video_ids=allowed_video_ids,
             )
 
@@ -155,20 +185,79 @@ class RetrievalTools:
             records=self._record_lookup(),
             weight=self.rerank_weight,
         )
+        # Object detector evidence is a stronger, signed signal than generic
+        # lexical overlap: an exact/synonym match is promoted; a known object
+        # mismatch is softly penalized.  No advanced UI field is required.
+        candidates = rerank_with_object_evidence(
+            query=queries[0],
+            candidates=candidates,
+            records=self._record_lookup(),
+        )
 
-        # KIS-only: re-rank at the video level. KIS ground truth is video-level,
-        # so a purely frame-level ranking (above) is brittle — a single outlier
-        # frame can lift the wrong video while the correct video has merely
-        # "many good frames". This aggregates frame scores → video_score →
-        # coarse filter top-K videos → re-emit frames video-aware. QA needs
-        # multiple strong frames per video kept intact (no coarse cap), and
-        # TRAKE has its own DP-based coarse filter, so this step is KIS-only.
-        if task_type == "kis":
-            candidates = self.pipeline.video_level_rerank(
-                candidates=candidates,
-                top_videos=self.coarse_top_k,
-                frames_per_video=self.pipeline.frames_per_video,
-            )
+        candidates = rerank_with_colour_evidence(
+            query=queries[0],
+            candidates=candidates,
+            records=self._record_lookup(),
+            weight=self.colour_rerank_weight,
+        )
+        candidates = contrastive_clip_colour_rerank(
+            query=queries[0],
+            candidates=candidates,
+            records=self._record_lookup(),
+            encode_text=self.encode_text,
+            encode_images=self.encode_images,
+            weight=self.contrastive_colour_rerank_weight,
+        )
+
+        # KIS is ranked per frame.  Do not aggregate/cap by video here: a
+        # candidate rises or falls only on its own retrieval evidence.
+
+        # Late-interaction (ColBERT-style MaxSim): bắt khớp cục bộ theo từng facet
+        # của query — một frame khớp BẤT KỲ facet nào (vd "water bottle") đều được
+        # nâng, điều vector CLIP pooled đơn lẻ không làm được. Chỉ chạy khi index
+        # thực sự chứa ĐỦ toàn bộ corpus: Chroma nếu chỉ build 1 phần (thiếu mấy
+        # chục nghìn vector) thì vector_id sẽ lệch → skip an toàn, fallback về
+        # RRF + metadata bonus, không crash.
+        if self.encode_text is not None and candidates:
+            index = self.pipeline.index
+            manifest_size = len(self.pipeline.manifest)
+            index_has_all = True
+            if hasattr(index, "collection_count"):  # ChromaVectorStore
+                try:
+                    if index.collection_count != manifest_size:
+                        index_has_all = False
+                        logger.warning(
+                            "late-interaction skipped: Chroma index has %d vectors "
+                            "but manifest has %d — index is partial, vector_id would "
+                            "mismatch. Rebuild with `aic2026 build-chroma-index`.",
+                            index.collection_count,
+                            manifest_size,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    index_has_all = False
+                    logger.warning("late-interaction skipped (index count error): %s", exc)
+            elif getattr(index, "vectors", None) is None:
+                index_has_all = False
+
+            if index_has_all:
+                try:
+                    frame_vectors = np.stack(
+                        [index.vectors[c.vector_id] for c in candidates]
+                    )
+                    candidates = late_interaction_rerank(
+                        query=queries[0],
+                        candidates=candidates,
+                        encode_text=self.encode_text,
+                        frame_vectors=frame_vectors,
+                        top_n=200,
+                        weight=self.late_interaction_weight,
+                    )
+                    # late_interaction chỉ sửa score tại chỗ, cần sort lại.
+                    candidates = sorted(
+                        candidates, key=lambda c: c.score, reverse=True
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("late-interaction rerank skipped: %s", exc)
 
         return candidates
 
@@ -196,6 +285,8 @@ class RetrievalTools:
         ``coarse_top_k`` giới hạn số video đưa vào DP alignment (xem
         ``RetrievalPipeline.retrieve_trake``): chỉ top-K video theo coarse
         video-level similarity mới được xét, tránh DP chạy trên vài nghìn video.
+        Object labels do not change this cap; it remains the guardrail that
+        keeps dynamic-programming alignment bounded on the full corpus.
         """
 
         cleaned_events = [
@@ -229,6 +320,16 @@ class RetrievalTools:
             self.video_filter_terms or []
         )
 
+        # Unit-test/lightweight pipelines may not expose manifest records.  The
+        # production pipeline always does; in that case apply evidence inside
+        # the event×frame matrix, before temporal DP selects an alignment.
+        object_adjustment = None
+        manifest = getattr(self.pipeline, "manifest", None)
+        if manifest:
+            object_adjustment = lambda event_index, manifest_index: object_evidence_adjustment(
+                cleaned_events[event_index], manifest[manifest_index], weight=0.08
+            ) or 0.0
+
         candidates = self.pipeline.retrieve_trake(
             event_embeddings=event_embeddings,
             top_videos=limit,
@@ -238,11 +339,24 @@ class RetrievalTools:
             penalty_weight=penalty_weight,
             video_ids=allowed_video_ids,
             coarse_top_k=coarse_top_k,
+            object_adjustment=object_adjustment,
         )
 
         # Safety net for any candidate the DB filter could not exclude.
         if allowed_video_ids is not None:
             candidates = self.pipeline._mask_video_ids(candidates, allowed_video_ids)
+
+        if self.trake_dense_refine:
+            candidates = refine_trake_candidates(
+                candidates,
+                event_embeddings,
+                self.encode_images,
+                video_root=self.trake_video_root,
+                top_videos=self.trake_refine_top_videos,
+                sample_fps=self.trake_refine_sample_fps,
+                window_seconds=self.trake_refine_window_seconds,
+                penalty_weight=penalty_weight,
+            )
 
         return candidates
 

@@ -41,6 +41,12 @@ class RetrievalAgent:
         # (~100GB, hàng chục nghìn video) cần K nhỏ (200) để DP không chạy trên
         # vài nghìn video. 0 = xét hết (backward-compatible).
         self.coarse_top_k = 200
+        # Bật dịch VI→EN tự động. Mặc định False (tắt) vì:
+        #  (1) người dùng có thể nhập sẵn tiếng Anh;
+        #  (2) dịch phụ thuộc Ollama — nếu fail thì gây ra frame sai;
+        #  (3) có query đòi giữ nguyên cụm từ gốc (tên riêng, chữ trên biển báo).
+        # Bật qua nút "Dịch VI→EN" trên UI hoặc tham số khi khởi tạo agent.
+        self.translate: bool = False
 
     @staticmethod
     def _deduplicate_best(
@@ -64,6 +70,7 @@ class RetrievalAgent:
             key=lambda candidate: candidate.score,
             reverse=True,
         )
+
     @staticmethod
     def _resolve_trake_events(
         query: Query,
@@ -93,52 +100,66 @@ class RetrievalAgent:
 
         # --- Translate Vietnamese → English (deterministic pipeline dropped the
         # LLM planner that used to do this). Text inside brackets (…), […],
-        # {…}, and quotes is preserved verbatim (e.g. names / sign text). If the
-        # LLM is unavailable or errors, we keep the original text so retrieval
-        # still runs. ─────────────────────────────────────────────────────────
+        # {…}, and quotes is preserved verbatim (e.g. names / sign text).
+        #
+        # CHỈ dịch khi ``self.translate=True`` (đã tick ô "Dịch VI→EN" trên UI,
+        # hoặc truyền ``translate_query=True`` từ CLI). Khi tắt, dùng NGUYÊN BẢN
+        # query — đúng semantics của checkbox "Mặc định TẮT — dùng query nguyên
+        # bản". Không dịch ngầm dù chưa tick.
+        #
+        # Khi bật: dịch OFFLINE (từ điển, không cần LLM, không bao giờ lỗi) để
+        # đưa tiếng Việt → tiếng Anh cho CLIP text encoder; nếu có LLM thì dịch
+        # tiếp bằng LLM để sửa lỗi chính tả EN, LLM lỗi tự fallback bản offline.
         from .translator import translate_query_fields
 
-        translated_text, translated_question, translated_events, translated_changed = (
-            translate_query_fields(
-                query.text,
-                query.question,
-                query.events,
-                self.llm,
-            )
-        )
-        if translated_changed:
-            changes: dict[str, dict[str, str]] = {}
-            if translated_text != query.text:
-                changes["text"] = {"from": query.text, "to": translated_text}
-            if (translated_question or "") != (query.question or ""):
-                changes["question"] = {
-                    "from": query.question or "",
-                    "to": translated_question or "",
-                }
-            for old_ev, new_ev in zip(query.events or [], translated_events):
-                if old_ev != new_ev:
-                    changes.setdefault("events", []).append({"from": old_ev, "to": new_ev})
-
-            query = Query(
-                query_id=query.query_id,
-                type=query.type,
-                text=translated_text,
-                question=translated_question,
-                events=translated_events,
-            )
-            trace = [
-                AgentTrace(
-                    step="translate",
-                    detail=json.dumps(
-                        {
-                            "normalized": True,
-                            "changes": changes,
-                        },
-                        ensure_ascii=False,
-                    ),
+        if self.translate:
+            use_llm = self.llm is not None
+            translated_text, translated_question, translated_events, translated_changed, translation_source = (
+                translate_query_fields(
+                    query.text,
+                    query.question,
+                    query.events,
+                    self.llm,
+                    use_llm=use_llm,
                 )
-            ]
+            )
+            if translated_changed:
+                changes: dict[str, dict[str, str]] = {}
+                if translated_text != query.text:
+                    changes["text"] = {"from": query.text, "to": translated_text}
+                if (translated_question or "") != (query.question or ""):
+                    changes["question"] = {
+                        "from": query.question or "",
+                        "to": translated_question or "",
+                    }
+                for old_ev, new_ev in zip(query.events or [], translated_events):
+                    if old_ev != new_ev:
+                        changes.setdefault("events", []).append({"from": old_ev, "to": new_ev})
+
+                query = Query(
+                    query_id=query.query_id,
+                    type=query.type,
+                    text=translated_text,
+                    question=translated_question,
+                    events=translated_events,
+                )
+                trace = [
+                    AgentTrace(
+                        step="translate",
+                        detail=json.dumps(
+                            {
+                                "normalized": True,
+                                "source": translation_source,
+                                "changes": changes,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                ]
+            else:
+                trace = []
         else:
+            # Chưa bật "Dịch VI→EN" → dùng query nguyên bản (chuẩn semantics checkbox).
             trace = []
 
         # --- Fully deterministic pipeline (no LLM round-trips) -------------
@@ -215,24 +236,26 @@ class RetrievalAgent:
 
         ranked = self._deduplicate_best(found)
 
-        selected = self._algorithmic_select(
-            query=query,
-            ranked=ranked,
-            k=self.answer_limit,
-        )
+        # The retrieval pool already carries the final blended score (RRF fusion
+        # + bounded metadata keyword bonus). We deliberately do NOT apply any
+        # further rerank stage (no video-level coarse filter, no late-interaction
+        # ColBERT pass, no MMR): those layers were found to flatten the fine-
+        # grained RRF ordering and hurt the single-video / few-video cases. The
+        # unified RRF + metadata ranking is returned as-is (capped to the answer
+        # limit by the task handler in _finalize).
         trace.append(
             AgentTrace(
                 step="rerank",
                 detail=(
-                    f"Algorithmic rerank selected {len(selected)} candidates "
-                    f"(metadata bonus + MMR diversity, no LLM judge)."
+                    f"Unified RRF (CLIP + BM25) fusion + bounded metadata bonus "
+                    f"over {len(ranked)} candidates; no further rerank stage."
                 ),
             )
         )
 
         candidates = self._finalize(
             query=query,
-            candidates=selected,
+            candidates=ranked,
             decision=AgentDecision(action="finish", rationale=plan.rationale),
             plan=plan,
         )
@@ -242,50 +265,6 @@ class RetrievalAgent:
             plan=plan,
             trace=trace,
         )
-
-    @staticmethod
-    def _algorithmic_select(
-        query: Query,
-        ranked: list[Candidate],
-        k: int,
-    ) -> list[Candidate]:
-        """Select the top ``k`` candidates without an LLM.
-
-        ``ranked`` already carries a retrieval score that ``tools.retrieve``
-        blended with a metadata keyword bonus. Here we apply **Maximal Marginal
-        Relevance (MMR)** to trade a little relevance for diversity, so one
-        video does not dominate the submission and recall across videos
-        improves.
-        """
-        if not ranked or k <= 0:
-            return []
-
-        lambda_mmr = 0.7  # 0.7 relevance, 0.3 diversity
-        selected: list[Candidate] = []
-        remaining = list(ranked)
-        max_score = max((c.score for c in ranked), default=1.0) or 1.0
-
-        def _redundancy(cand: Candidate) -> float:
-            # Cheap proxy: same video ⇒ high redundancy, else low.
-            return (
-                max((1.0 for s in selected if s.video_id == cand.video_id), default=0.0)
-                if selected
-                else 0.0
-            )
-
-        while remaining and len(selected) < k:
-            best = None
-            best_gain = None
-            for cand in remaining:
-                rel = cand.score / max_score
-                gain = lambda_mmr * rel - (1 - lambda_mmr) * _redundancy(cand)
-                if best_gain is None or gain > best_gain:
-                    best_gain = gain
-                    best = cand
-            selected.append(best)
-            remaining.remove(best)
-
-        return selected
 
     def _finalize(
         self,

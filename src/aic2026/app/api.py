@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from aic2026.agent.types import AgentResult
+from aic2026.ingestion import resolve_feature_sources
 from aic2026.models import Query
 
 app = FastAPI(title="AIC 2026 Agent API", version="0.2.0")
@@ -26,14 +27,18 @@ streamlit run src/aic2026/app/ui.py</pre></body></html>"""
 
 class RuntimeConfig(BaseModel):
     """Cấu hình nội bộ; UI gửi để backend nạp đúng index/encoder."""
-    manifest_path: str = "data/processed/derived_manifest.jsonl"
-    features_path: str = "data/processed/derived_features.npy"
+    manifest_path: str | None = None
+    features_path: str | None = None
     clip_pretrained: str = "openai"
     llm_model: str = "qwen3.5:4b"
     ollama_url: str = "http://127.0.0.1:11434"
-    backend: str = "auto"
+    # The official CLIP matrix is static; FAISS is faster than starting a
+    # Chroma collection and is the default execution path.
+    backend: str = "faiss"
     chroma_dir: str = "data/indexes/chroma"
+    late_interaction_weight: float = 0.0
     metadata_filter: str = ""
+    translate_query: bool = False
     vlm_backend: str = "ollama"
     vlm_model: str = "qwen2.5vl:3b"
     vlm_device: str | None = None
@@ -57,10 +62,12 @@ def load_orchestrator(
     clip_pretrained: str,
     llm_model: str,
     ollama_url: str,
-    backend: str = "auto",
+    backend: str = "faiss",
     chroma_dir: str = "data/indexes/chroma",
     metadata_filter: str = "",
+    translate_query: bool = False,
     vlm_backend: str = "ollama",
+    late_interaction_weight: float = 0.0,
     vlm_model: str = "qwen2.5vl:3b",
     vlm_device: str | None = None,
     vlm_dtype: str = "bfloat16",
@@ -75,12 +82,13 @@ def load_orchestrator(
     from aic2026.retrieval import RetrievalPipeline
     from aic2026.retrieval.factory import load_index_for_query
 
-    manifest_file, features_file = Path(manifest_path), Path(features_path)
+    manifest_file, features_file = resolve_feature_sources(manifest_path, features_path)
     missing = [str(path) for path in (manifest_file, features_file) if not path.exists()]
     if missing:
         hint = (
-            "Chạy: python -m aic2026.cli embed-keyframes --video-id L21_V001 "
-            "(hoặc bỏ --video-id để encode toàn bộ keyframes)."
+            "Thiếu index retrieval. Ưu tiên official_features.npy (CLIP sẵn BTC, "
+            "sinh bởi `aic2026 prepare-official`); fallback derived_features.npy "
+            "(sinh bởi `aic2026 embed-keyframes`). Chạy một trong hai lệnh trên."
         )
         raise FileNotFoundError(f"Thiếu index retrieval: {', '.join(missing)}. {hint}")
     manifest_records = load_manifest(manifest_file)
@@ -92,11 +100,15 @@ def load_orchestrator(
     )
     pipeline = RetrievalPipeline(index, manifest_records, frames_per_video=20)
     text_encoder = OpenCLIPTextEmbedder(pretrained=clip_pretrained)
-    tools = RetrievalTools(pipeline, text_encoder.encode)
+    tools = RetrievalTools(
+        pipeline, text_encoder.encode, encode_images=text_encoder.encode_images
+    )
     tools.coarse_top_k = coarse_top_k
     tools.video_filter_terms = [t.strip() for t in metadata_filter.split(",") if t.strip()] or None
-    # Nối BM25 lexical vào retrieval (text từ Objects/Metadata). tools.retrieve tự
-    # động bỏ qua khi manifest không có text (is_empty), nên an toàn cả khi chưa nạp data.
+    tools.late_interaction_weight = late_interaction_weight
+    # Objects are frame-specific and useful for lexical retrieval.  Video
+    # metadata is deliberately excluded: it is near-duplicate across frames and
+    # adds memory/IDF noise without improving frame selection.
     from aic2026.retrieval import BM25Index
     tools.bm25_index = BM25Index(manifest_records)
     if vlm_backend != "none" and vlm_model:
@@ -125,6 +137,7 @@ def load_orchestrator(
         ),
     )
     agent.coarse_top_k = coarse_top_k
+    agent.translate = translate_query
     return agent
 
 
@@ -143,11 +156,14 @@ def run_task(task_type: str, request: TaskRequest) -> AgentResult:
             config.ollama_url,
             backend=config.backend,
             chroma_dir=config.chroma_dir,
+            metadata_filter=config.metadata_filter,
+            translate_query=config.translate_query,
             vlm_backend=config.vlm_backend,
             vlm_model=config.vlm_model,
             vlm_device=config.vlm_device,
             vlm_dtype=config.vlm_dtype,
             vlm_timeout=config.vlm_timeout,
+            late_interaction_weight=config.late_interaction_weight,
         )
         return orchestrator.run(Query(query_id=request.query_id, type=task_type, text=request.text, question=request.question, events=request.events))
     except HTTPException:
@@ -167,20 +183,23 @@ def health() -> dict[str, str]:
 
 @app.get("/health/ready")
 def ready(
-    manifest_path: str = "data/processed/derived_manifest.jsonl",
-    features_path: str = "data/processed/derived_features.npy",
+    manifest_path: str | None = None,
+    features_path: str | None = None,
     chroma_dir: str = "data/indexes/chroma",
 ) -> dict[str, object]:
     """Kiểm tra nhanh trước khi UI gọi agent (tránh chờ load model rồi mới báo thiếu file)."""
+    from aic2026.ingestion import resolve_feature_sources
     from aic2026.retrieval import ChromaVectorStore
-    manifest_ok = Path(manifest_path).exists()
-    features_ok = Path(features_path).exists()
+
+    resolved_manifest, resolved_features = resolve_feature_sources(manifest_path, features_path)
+    manifest_ok = resolved_manifest.exists()
+    features_ok = resolved_features.exists()
     chroma_ok = ChromaVectorStore.available() and (Path(chroma_dir) / "chroma.sqlite3").exists()
     return {
         "ready": manifest_ok and features_ok,
-        "manifest_path": manifest_path,
+        "manifest_path": str(resolved_manifest),
         "manifest_exists": manifest_ok,
-        "features_path": features_path,
+        "features_path": str(resolved_features),
         "features_exists": features_ok,
         "chroma_dir": chroma_dir,
         "chroma_ok": chroma_ok,

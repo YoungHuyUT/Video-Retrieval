@@ -13,6 +13,7 @@ class OrganizerAssets:
     objects: Path | None
     clip_features: tuple[Path, ...]
     metadata: Path | None
+    map_keyframes: Path | None = None
     support_archives: tuple[Path, ...] = ()
 
     def missing_required(self) -> list[str]:
@@ -45,12 +46,21 @@ def inspect_official_assets(raw_dir: Path) -> OrganizerAssets:
     clip_root = _folder_with_fallback(raw_dir, "CLIP features", (processed_root,)) or _folder_with_fallback(raw_dir, "CLIP_features", (processed_root,))
     features = tuple(sorted((clip_root or raw_dir).rglob("*.npy")))
     archives = tuple(sorted(path for path in raw_dir.rglob("*.zip") if path.name.casefold().startswith(("clip-features", "map-keyframes", "media-info", "objects"))))
+    # map-keyframes CSV: ưu tiên thư mục được giải nén support (data/raw/map-keyframes.../map-keyframes)
+    # hoặc data/downloads, fallback tìm bất kỳ thư mục con nào mang tên "map-keyframes".
+    map_root = (
+        _folder_with_fallback(raw_dir.parent, "map-keyframes-aic25-b1", (raw_dir,))
+        or _folder_with_fallback(raw_dir, "map-keyframes-aic25-b1")
+        or _folder_with_fallback(raw_dir, "map-keyframes")
+    )
+
     return OrganizerAssets(
         videos=_folder_with_fallback(raw_dir, "Videos", (processed_root,)),
         keyframes=_folder_with_fallback(raw_dir, "Keyframes", (processed_root,)),
         objects=_folder_with_fallback(raw_dir, "Objects", (processed_root,)),
         clip_features=features,
         metadata=_folder_with_fallback(raw_dir, "Metadata", (processed_root,)),
+        map_keyframes=map_root,
         support_archives=archives,
     )
 

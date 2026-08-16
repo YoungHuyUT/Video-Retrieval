@@ -288,7 +288,7 @@ def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
 def _render_trake_gallery(query: Query, visible: list[tuple[int, Candidate]], root: Path, selected: set[int]) -> None:
     try:
         manifest_path = st.session_state.get("manifest_path")
-        lookup = load_keyframed_lookup_safe(manifest_path) if manifest_path else {}
+        lookup = load_keyframe_lookup(manifest_path) if manifest_path else {}
     except (FileNotFoundError, ValueError):
         lookup = {}
 
@@ -385,6 +385,21 @@ with rest_col:
             if submitted:
                 st.session_state["_run_agent"] = True
 
+    # Nút tùy chọn: dịch VI→EN trước khi retrieval. Mặc định TẮT (dùng query nguyên bản).
+    # Bật khi query nhập bằng tiếng Việt và muốn đảm bảo đầu vào CLIP (tiếng Anh).
+    translate_query = st.checkbox(
+        "🌐 Dịch VI→EN",
+        value=st.session_state.get("cfg_translate", False),
+        key="cfg_translate",
+        help=(
+            "Dịch truy vấn tiếng Việt sang tiếng Anh trước khi retrieval (CLIP text "
+            "encoder là tiếng Anh nên đầu vào tiếng Anh cho kết quả tốt hơn). "
+            "Mặc định TẮT — dùng query nguyên bản. Bật nếu bạn nhập tiếng Việt và "
+            "muốn hệ thống tự dịch. Khi tắt mà vẫn nhập tiếng Việt, retrieval có thể "
+            "ra frame sai do CLIP không hiểu tiếng Việt."
+        ),
+    )
+
 if st.session_state.get("_run_agent"):
     st.session_state["_run_agent"] = False
     if not text.strip():
@@ -396,12 +411,13 @@ if st.session_state.get("_run_agent"):
                 st.error("TRAKE cần ít nhất một event.")
             else:
                 runtime = {
-                    "manifest_path": st.session_state.get("cfg_manifest", "data/processed/derived_manifest.jsonl"),
-                    "features_path": st.session_state.get("cfg_features", "data/processed/derived_features.npy"),
+                    "manifest_path": st.session_state.get("cfg_manifest", "data/processed/official_manifest.jsonl"),
+                    "features_path": st.session_state.get("cfg_features", "data/processed/official_features.npy"),
                     "clip_pretrained": st.session_state.get("cfg_clip", "openai"),
                     "llm_model": st.session_state.get("cfg_llm", "qwen3.5:4b"),
                     "ollama_url": st.session_state.get("cfg_ollama", "http://127.0.0.1:11434"),
                     "metadata_filter": st.session_state.get("cfg_filter", ""),
+                    "translate_query": bool(st.session_state.get("cfg_translate", False)),
                     "coarse_top_k": int(st.session_state.get("cfg_coarse_top_k", 200)),
                 }
                 backend_url = st.session_state.get("cfg_backend", "http://127.0.0.1:8000")
@@ -415,22 +431,36 @@ if st.session_state.get("_run_agent"):
                     manifest_path=runtime["manifest_path"],
                     selected=set(),  # reset tick khi chạy query mới
                 )
-                # Lưu bản dịch (từ trace bước "translate") để hiển thị cho người dùng
+                # Lưu bản dịch (từ trace bước "translate") để hiển thị cho người dùng.
+                # Cấu trúc detail: {"normalized": true, "changes": {"text": {"from":.., "to":..}}}
+                # → "to" nằm SÂU trong changes["text"]["to"], KHÔNG phải _td.get("to") gốc.
                 translated = None
+                translation_source = None
                 for step in result.trace:
                     if step.step == "translate":
                         try:
                             _td = json.loads(step.detail)
-                            translated = _td.get("to")
-                        except (json.JSONDecodeError, ValueError, AttributeError):
+                            translation_source = _td.get("source")
+                            _changes = _td.get("changes") or {}
+                            _text_change = _changes.get("text") or {}
+                            translated = _text_change.get("to") or _td.get("to")
+                        except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
                             translated = None
                         break
                 st.session_state["translated_query"] = translated
                 # Thông báo rõ ràng cho người dùng biết query đã được dịch
-                if translated:
+                if translation_source == "offline_fallback":
+                    st.toast(
+                        f"⚠️ LLM dịch lỗi — đang dùng bản dịch offline: {translated or text}",
+                        icon="🌐",
+                    )
+                elif translated:
                     st.toast(f"✅ Đã dịch VI→EN: {translated}", icon="🌐")
                 elif text.strip() and _is_english(text):
                     st.toast("ℹ️ Query đã là tiếng Anh — không cần dịch", icon="🌐")
+                elif not bool(st.session_state.get("cfg_translate", False)):
+                    # Không bật nút "Dịch VI→EN" → backend dùng query nguyên bản.
+                    st.toast("ℹ️ Chưa bật 'Dịch VI→EN' — dùng query nguyên bản", icon="🌐")
                 else:
                     st.toast("⚠️ Không dịch được (LLM lỗi?) — dùng nguyên bản tiếng Việt", icon="🌐")
                 # Xóa trạng thái widget checkbox cũ (sel_*) để không lệch với query mới
@@ -441,8 +471,8 @@ if st.session_state.get("_run_agent"):
 
 with st.expander("Cấu hình nâng cao"):
     st.text_input("Backend API", "http://127.0.0.1:8000", key="cfg_backend")
-    st.text_input("Manifest", "data/processed/derived_manifest.jsonl", key="cfg_manifest")
-    st.text_input("Feature .npy", "data/processed/derived_features.npy", key="cfg_features")
+    st.text_input("Manifest", "data/processed/official_manifest.jsonl", key="cfg_manifest")
+    st.text_input("Feature .npy", "data/processed/official_features.npy", key="cfg_features")
     st.text_input("Root keyframe", "data/processed", key="cfg_root")
     st.text_input("CLIP pretrained", "openai", key="cfg_clip")
     st.text_input("Ollama model", "qwen3.5:4b", key="cfg_llm")

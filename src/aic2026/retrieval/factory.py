@@ -11,6 +11,8 @@ from .vectordb import ChromaVectorStore
 
 logger = logging.getLogger(__name__)
 
+# The competition corpus is static: a local FAISS index over the supplied CLIP
+# matrix is both faster and simpler than a database-backed vector store.
 Backend = Literal["auto", "chroma", "faiss", "numpy"]
 
 
@@ -20,24 +22,12 @@ def _resolve_backend(
     collection_name: str,
     manifest: list[FrameRecord],
 ) -> str:
-    """Resolve ``auto`` to an explicit backend based on what is available."""
+    """Resolve ``auto`` to the lightweight local index.
+
+    Chroma remains available when explicitly requested, but automatic selection
+    must not open or validate a persistent collection on every process start.
+    """
     if backend == "auto":
-        try:
-            store = ChromaVectorStore.from_manifest(
-                manifest=manifest,
-                persist_dir=chroma_dir,
-                collection_name=collection_name,
-            )
-            if store.collection_count > 0 and store.collection_count == len(manifest):
-                return "chroma"
-            logger.warning(
-                "Chroma collection size %d does not match manifest (%d); "
-                "falling back to FAISS/numpy",
-                store.collection_count,
-                len(manifest),
-            )
-        except Exception as exc:  # noqa: BLE001 — auto mode must fall back safely
-            logger.debug("Chroma unavailable for auto backend: %s", exc)
         return "faiss"
     if backend in ("chroma", "faiss", "numpy"):
         return backend
@@ -50,15 +40,14 @@ def _resolve_backend(
 def build_vector_index(
     features: Path,
     manifest: list[FrameRecord],
-    backend: str = "auto",
+    backend: str = "faiss",
     chroma_dir: str | Path = "data/indexes/chroma",
     collection_name: str = "aic2026_frames",
     space: str = "cosine",
 ) -> VectorIndex | ChromaVectorStore:
     """Build an index backend from a feature ``.npy`` + manifest.
 
-    ``backend="auto"`` prefers an existing Chroma collection and otherwise falls
-    back to FAISS/numpy via ``VectorIndex``.
+    ``backend="faiss"`` (the default) uses the supplied CLIP matrix directly.
     """
     resolved = _resolve_backend(backend, chroma_dir, collection_name, manifest)
     if resolved == "chroma":
@@ -75,12 +64,11 @@ def build_vector_index(
 def load_index_for_query(
     features: Path,
     manifest: list[FrameRecord],
-    backend: str = "auto",
+    backend: str = "faiss",
     chroma_dir: str | Path = "data/indexes/chroma",
     collection_name: str = "aic2026_frames",
 ) -> VectorIndex | ChromaVectorStore:
-    """Query-time loader: reuse an existing Chroma collection when present,
-    else load the FAISS/numpy index from the ``.npy`` file."""
+    """Query-time loader for the supplied CLIP ``.npy`` matrix."""
     resolved = _resolve_backend(backend, chroma_dir, collection_name, manifest)
     if resolved == "chroma":
         return ChromaVectorStore.from_manifest(

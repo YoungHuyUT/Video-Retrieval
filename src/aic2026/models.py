@@ -8,11 +8,24 @@ QueryType = str
 
 
 class FrameRecord(BaseModel):
+    """Per-frame record. Object labels stay here because they change per frame.
+
+    Video-level text (title/description/keywords) used to be denormalised into
+    every record, which inflated the manifest ~10x and broke BM25 IDF (the same
+    video's keywords were counted 200 times). Those fields are now kept only as
+    deprecated defaults so old manifests on disk still load — see
+    ``retrieval.video_metadata.VideoMetadataStore`` for the canonical store.
+    """
+
     vector_id: int
     video_id: str
     frame_id: int
     keyframe_path: str
     object_labels: list[str] = Field(default_factory=list)
+    # Deprecated: prefer VideoMetadataStore.get(video_id).metadata_keywords.
+    # Kept as defaults so legacy manifests still validate; new code should not
+    # read these fields.
+    metadata_keywords: list[str] = Field(default_factory=list)
     title: str | None = None
     description: str | None = None
     video_path: str | None = None

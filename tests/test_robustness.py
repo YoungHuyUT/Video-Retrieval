@@ -30,6 +30,20 @@ def test_bm25_empty_corpus_does_not_crash() -> None:
     assert scores.size == 0
 
 
+def test_bm25_omits_documents_without_a_lexical_match() -> None:
+    """Zero-score rows must not enter RRF as arbitrary lexical results."""
+    manifest = [
+        FrameRecord(vector_id=0, video_id="V1", frame_id=1, keyframe_path="1.jpg", object_labels=["fish"]),
+        FrameRecord(vector_id=1, video_id="V2", frame_id=1, keyframe_path="2.jpg", object_labels=["turtle"]),
+    ]
+    index = BM25Index(manifest)
+
+    ids, scores = index.search("sea turtle", k=10)
+
+    assert ids.tolist() == [1]
+    assert scores.size == 1
+
+
 def test_bm25_skips_corrupt_archive_in_build(
     tmp_path: Path,
 ) -> None:

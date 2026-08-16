@@ -1,6 +1,0 @@
-{
-  "query_id": "q_trake_1",
-  "type": "trake",
-  "text": "Tìm 3 khoảnh khắc chính khi người nói chuyện trước khán giả",
-  "events": ["Mở đầu nói chuyện", "Trình bày nội dung", "Kết thúc"]
-}

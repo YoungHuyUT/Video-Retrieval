@@ -33,6 +33,7 @@ class ChromaVectorStore:
         "frame_id",
         "keyframe_path",
         "object_labels",
+        "metadata_keywords",
         "title",
         "description",
     )
@@ -212,13 +213,26 @@ class ChromaVectorStore:
         embeddings: np.ndarray,
         metadatas: list[dict[str, Any]],
     ) -> None:
-        """Insert/upsert vectors with their metadata."""
+        """Insert/upsert vectors with their metadata.
+
+        Chroma caps a single ``upsert`` at 5461 rows, so large manifests (e.g.
+        177k frames) are split into safe batches automatically.
+        """
+        # Chroma hard limit is 5461 rows/upsert; keep a safety margin.
+        _CHROMA_MAX_BATCH = 5000
         normalized = _normalize_rows(embeddings)
-        self._collection.upsert(
-            ids=list(ids),
-            embeddings=normalized.tolist(),
-            metadatas=list(metadatas),
-        )
+        emb_rows = normalized.tolist()
+        total = len(ids)
+        if total <= _CHROMA_MAX_BATCH:
+            self._collection.upsert(ids=list(ids), embeddings=emb_rows, metadatas=list(metadatas))
+            return
+        for start in range(0, total, _CHROMA_MAX_BATCH):
+            end = start + _CHROMA_MAX_BATCH
+            self._collection.upsert(
+                ids=ids[start:end],
+                embeddings=emb_rows[start:end],
+                metadatas=metadatas[start:end],
+            )
 
     def search(self, query: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
         """Return ``(manifest_indices, cosine_similarities)`` for the top-k.
@@ -302,6 +316,11 @@ class ChromaVectorStore:
         if record.object_labels:
             metadata["object_labels"] = json.dumps(
                 list(record.object_labels),
+                ensure_ascii=False,
+            )
+        if record.metadata_keywords:
+            metadata["metadata_keywords"] = json.dumps(
+                list(record.metadata_keywords),
                 ensure_ascii=False,
             )
         if record.title:

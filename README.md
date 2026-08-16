@@ -130,66 +130,7 @@ python -m aic2026.cli embed-keyframes --keyframes-dir data/raw/Keyframes --featu
 
 ---
 
-## 6. Chạy agent (KIS / Q&A / TRAKE)
-
-Tạo file query JSON theo schema `Query` (`query_id`, `type`, `text`, `question?`, `events?`):
-
-**KIS** (`query_kis.json`):
-```json
-{
-  "query_id": "q_kis_1",
-  "type": "kis",
-  "text": "Tìm video về một diễn giả mặc áo đỏ phát biểu tại một cuộc họp báo ngoài trời, phía sau có nhiều cây xanh."
-}
-```
-
-**Q&A** (`query_qa.json`):
-```json
-{
-  "query_id": "q_qa_1",
-  "type": "qa",
-  "text": "Trong video về lễ trao giải thưởng âm nhạc",
-  "question": "Có bao nhiêu người lên sân khấu để nhận giải thưởng lớn nhất?"
-}
-```
-
-**TRAKE** (`query_trake.json`):
-```json
-{
-  "query_id": "q_trake_1",
-  "type": "trake",
-  "text": "Tìm 4 khoảnh khắc chính khi vận động viên thực hiện cú nhảy",
-  "events": ["Giậm nhảy", "Bay qua xà", "Tiếp đất", "Đứng dậy"]
-}
-```
-
-Chạy:
-```bat
-python -m aic2026.cli agent-query --query query_kis.json --features data/processed/derived_features.npy --manifest data/processed/derived_manifest.jsonl --output outputs/result_kis.json
-```
-
-**Lưu ý Q&A — VLM vision qua Ollama (khuyến nghị, CPU-friendly):**
-Q&A gắn `answer` qua model vision chạy trên **Ollama** (`qwen2.5vl:3b`), không cần torch/transformers cho bước này:
-```bat
-:: Pull model vision một lần
-ollama pull qwen2.5vl:3b
-
-:: Chạy Q&A với backend VLM mặc định = ollama
-python -m aic2026.cli agent-query --query query_qa.json --features data/processed/derived_features.npy --manifest data/processed/derived_manifest.jsonl --vlm-backend ollama --vlm-model qwen2.5vl:3b --output outputs/result_qa.json
-```
-Các option: `--vlm-backend ollama|transformers|none`, `--vlm-model` (tên model trên Ollama), `--vlm-timeout`. Backend `transformers` (Qwen2.5-VL-3B) nặng và cần GPU — chỉ dùng nếu bạn có VRAM. Nếu VLM không trả lời được, pipeline vẫn chạy nhưng candidate Q&A sẽ có `answer` rỗng → submission không hợp lệ.
-
-### Các bước pipeline (KIS/Q&A)
-```
-plan (LLM) → retrieve (CLIP vector + BM25 → RRF fusion) → rerank (metadata keyword bonus) → judge (LLM chọn evidence) → finalize (VLM cho Q&A)
-```
-- **retrieve**: fusion qua RRF hai bảng xếp hạng (vector CLIP và BM25 lexical) — xem `hybrid_retrieve_raw`.
-- **rerank**: `rerank_with_metadata` cộng điểm thưởng nhỏ (mặc định `weight=0.05`) cho candidate có `object_labels`/`title`/`description` chứa từ khóa query. Đây là **heuristic đếm từ khóa, không phải model**. TRAKE không qua bước này (dùng DP alignment riêng).
-- **judge**: text LLM (`qwen3.5:4b`) chọn `selected_vector_ids` từ evidence đã retrieval.
-
----
-
-## 7. Đánh giá (evaluate)
+## 6. Đánh giá (evaluate)
 
 Đánh giá 1 query với ground-truth theo đúng công thức R@k + Final Score của BTC.
 

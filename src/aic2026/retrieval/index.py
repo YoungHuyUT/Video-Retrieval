@@ -53,6 +53,20 @@ class VectorIndex:
         """
         if not video_ids:
             return self.search(query, k)
-        ids, scores = self.search(query, k)
-        mask = np.array([vid in video_ids for vid in (self.manifest_video_ids[i] for i in ids)])
-        return ids[mask], scores[mask]
+        if len(self.manifest_video_ids) != len(self.vectors):
+            raise ValueError("manifest_video_ids must align with the vector index")
+        query = np.asarray(query, dtype=np.float32)
+        query /= max(float(np.linalg.norm(query)), 1e-12)
+        allowed = np.fromiter(
+            (video_id in video_ids for video_id in self.manifest_video_ids),
+            dtype=bool,
+            count=len(self.manifest_video_ids),
+        )
+        ids = np.flatnonzero(allowed)
+        if len(ids) == 0:
+            return np.array([], dtype=int), np.array([], dtype=np.float32)
+        scores = self.vectors[ids] @ query
+        k = min(k, len(ids))
+        top = np.argpartition(-scores, k - 1)[:k]
+        top = top[np.argsort(-scores[top])]
+        return ids[top], scores[top]

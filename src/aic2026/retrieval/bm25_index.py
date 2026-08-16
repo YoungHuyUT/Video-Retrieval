@@ -3,10 +3,14 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from aic2026.models import FrameRecord
+
+if TYPE_CHECKING:
+    from .video_metadata import VideoMetadataStore
 
 # ---------------------------------------------------------------------------
 # Tokenizer
@@ -24,13 +28,22 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in text.split() if t]
 
 
-def _record_tokens(record: FrameRecord) -> list[str]:
-    """Concatenate all text fields of a FrameRecord into a token list."""
+def _record_tokens(
+    record: FrameRecord,
+    video_meta_text: str = "",
+) -> list[str]:
+    """Concatenate text fields of a FrameRecord into a token list.
+
+    Bao gồm ``object_labels`` (entity tiếng Anh từ Faster R-CNN) + video-level
+    metadata keywords/title/description (đã được tách ra ngoài manifest, truyền
+    qua ``video_meta_text`` để giữ nguyên behavior cũ mà không nhân bản keyword
+    trên từng frame — chỉnh IDF BM25 đúng nghĩa).
+
+    Tokenizer giữ nguyên unicode để match cả query tiếng Việt lẫn tiếng Anh.
+    """
     parts: list[str] = list(record.object_labels)
-    if record.title:
-        parts.append(record.title)
-    if record.description:
-        parts.append(record.description)
+    if video_meta_text:
+        parts.append(video_meta_text)
     return _tokenize(" ".join(parts))
 
 
@@ -45,13 +58,23 @@ class BM25Index:
     Build once from the manifest; call `search` at query time.
     Frames with no text metadata return score=0 for all queries, which is
     correct — they survive only through the vector index.
+
+    Optional ``video_metadata`` carries the per-video title/description/keywords
+    text once (not 200x duplicated) so BM25 sees the canonical document for
+    each video. Each frame in the manifest inherits its video's text via the
+    precomputed ``_video_text_by_id`` cache.
     """
 
     _bm25: object = field(init=False, repr=False)
     _size: int = field(init=False, repr=False)
     _empty: bool = field(init=False, repr=False)
+    _video_text_by_id: dict[str, str] = field(init=False, repr=False, default_factory=dict)
 
-    def __init__(self, manifest: list[FrameRecord]) -> None:
+    def __init__(
+        self,
+        manifest: list[FrameRecord],
+        video_metadata: "VideoMetadataStore | None" = None,
+    ) -> None:
         try:
             from rank_bm25 import BM25Okapi  # type: ignore
         except ImportError as exc:
@@ -59,7 +82,29 @@ class BM25Index:
                 "rank-bm25 is required: uv sync  (or pip install rank-bm25)"
             ) from exc
 
-        corpus = [_record_tokens(record) for record in manifest]
+        # Precompute per-video text once (NOT per frame). This is the fix:
+        # previously the same video's keywords were tokenized 200 times, which
+        # inflated term frequency and depressed IDF for video-level vocabulary.
+        store = video_metadata
+        video_text: dict[str, str] = {}
+        if store is not None:
+            for vm in store.all():
+                chunks = [vm.title or "", vm.description or "", *vm.metadata_keywords]
+                text = " ".join(chunks).strip()
+                if text:
+                    video_text[vm.video_id] = text
+        # Backward-compat: legacy manifests carry keywords per-frame. If the
+        # store is empty or absent for a video, fall back to the per-frame
+        # metadata_keywords so we don't silently lose all lexical evidence.
+        self._video_text_by_id = video_text
+
+        corpus: list[list[str]] = []
+        for record in manifest:
+            text = video_text.get(record.video_id, "")
+            if not text and record.metadata_keywords:
+                # Legacy fallback — keyword was copied per frame in old builds.
+                text = " ".join(record.metadata_keywords)
+            corpus.append(_record_tokens(record, video_meta_text=text))
         # BM25Okapi raises ZeroDivisionError when EVERY document is empty
         # (no Objects/Metadata text), because self.idf ends up empty. In that
         # case there is nothing to search lexically: fall back to a degenerate
@@ -104,16 +149,29 @@ class BM25Index:
         scores: np.ndarray = np.asarray(
             self._bm25.get_scores(tokens), dtype=np.float32
         )
-        k = min(k, self._size)
+        # Do not return arbitrary zero-score documents.  When a query has no
+        # lexical match, ``argpartition`` otherwise picks implementation/order
+        # dependent rows and RRF incorrectly boosts them over vector results.
+        positive_ids = np.flatnonzero(scores > 0)
+        if positive_ids.size == 0:
+            return np.array([], dtype=np.intp), np.array([], dtype=np.float32)
+
+        k = min(k, positive_ids.size)
         if k <= 0:
             return np.array([], dtype=np.intp), np.array([], dtype=np.float32)
 
         # Partial sort for efficiency (same pattern as VectorIndex)
-        top_ids = np.argpartition(-scores, k - 1)[:k]
+        candidate_scores = scores[positive_ids]
+        top_positions = np.argpartition(-candidate_scores, k - 1)[:k]
+        top_ids = positive_ids[top_positions]
         top_ids = top_ids[np.argsort(-scores[top_ids])]
         return top_ids, scores[top_ids]
 
     @classmethod
-    def from_manifest(cls, manifest: list[FrameRecord]) -> BM25Index:
+    def from_manifest(
+        cls,
+        manifest: list[FrameRecord],
+        video_metadata: "VideoMetadataStore | None" = None,
+    ) -> BM25Index:
         """Convenience constructor; mirrors VectorIndex.from_npy naming style."""
-        return cls(manifest)
+        return cls(manifest, video_metadata=video_metadata)

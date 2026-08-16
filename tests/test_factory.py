@@ -45,7 +45,7 @@ def test_auto_falls_back_to_faiss_without_chromadb(
     assert isinstance(index, VectorIndex)
 
 
-def test_auto_prefers_chroma_when_collection_exists(tmp_path: Path) -> None:
+def test_auto_uses_local_index_when_chroma_collection_exists(tmp_path: Path) -> None:
     features = _write_features(tmp_path)
     manifest = _sample_manifest()
     # Build the collection first.
@@ -56,7 +56,7 @@ def test_auto_prefers_chroma_when_collection_exists(tmp_path: Path) -> None:
         chroma_dir=tmp_path / "chroma",
     )
     index = load_index_for_query(features, manifest, backend="auto", chroma_dir=tmp_path / "chroma")
-    assert isinstance(index, ChromaVectorStore)
+    assert isinstance(index, VectorIndex)
 
 
 def test_build_vector_index_raises_for_unknown_backend(tmp_path: Path) -> None:

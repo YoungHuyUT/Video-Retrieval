@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 
@@ -9,6 +9,7 @@ from aic2026.models import Candidate, FrameRecord
 from aic2026.temporal import align_events_dp
 
 from .index import VectorIndex
+from .video_metadata import VideoMetadataStore
 
 if TYPE_CHECKING:
     from .bm25_index import BM25Index
@@ -17,6 +18,19 @@ if TYPE_CHECKING:
 
 # Standard Reciprocal Rank Fusion constant.
 _RRF_K = 60
+
+# Pool tối đa để RRF quét xuyên toàn bộ corpus khi có full data (BM25 sống). BM25 vốn
+# đã quét toàn bộ video qua text; mở rộng thêm vector pool giúp những video có frame khớp
+# nằm ở rank sâu (cosine thấp) vẫn lọt vào top sau RRF. Hằng số này cũng dùng trong
+# tools.py (import từ đây) để tính adaptive RRF k.
+FULL_DATA_CORPUS_TOP_FRAMES = 2000
+
+# Minimum and maximum k for adaptive RRF — small candidate pools (e.g. pool=500
+# in the KIS fallback path) compress the rank contribution 1/(k+rank+1) so much
+# that the dynamic range collapses and ties become common.  We scale k down
+# toward 1 for small pools so rank-position still carries discriminative weight.
+_RRF_K_MIN = 1
+_RRF_K_MAX = 60
 
 
 class RetrievalPipeline:
@@ -32,6 +46,7 @@ class RetrievalPipeline:
         index: VectorIndex | ChromaVectorStore,
         manifest: list[FrameRecord],
         frames_per_video: int = 3,
+        video_metadata: VideoMetadataStore | None = None,
     ) -> None:
         if len(index.vectors) != len(manifest):
             raise ValueError("Feature count must equal manifest record count")
@@ -42,6 +57,11 @@ class RetrievalPipeline:
         self.index = index
         self.manifest = manifest
         self.frames_per_video = frames_per_video
+        # Per-video metadata (title/description/keywords) lives outside the
+        # manifest now to avoid 200x duplication. When provided, metadata
+        # filters and BM25 tokenization consult it instead of scanning every
+        # FrameRecord.
+        self.video_metadata = video_metadata or VideoMetadataStore.empty()
         # Cache video_id per row so the FAISS/NumPy backend can mask by video.
         if hasattr(self.index, "manifest_video_ids"):
             self.index.manifest_video_ids = [record.video_id for record in manifest]
@@ -74,6 +94,11 @@ class RetrievalPipeline:
         concept that lives only in metadata (e.g. "trong cửa hàng"): narrowing the
         candidate video set before embedding retrieval cuts many false frames and
         raises precision. Terms are matched case-insensitively and accent-insensitively.
+
+        Cost: O(V) over :attr:`video_metadata` (873 docs) plus a single O(N) pass
+        to merge per-frame ``object_labels`` for the matched candidate set only.
+        Previously this scanned all 200k FrameRecords — the duplication of video
+        metadata per frame made that both slow and BM25-IDF-incorrect.
         """
         if not terms:
             return sorted(video_ids or {record.video_id for record in self.manifest})
@@ -82,25 +107,48 @@ class RetrievalPipeline:
 
         def _fold(value: str) -> str:
             value = unicodedata.normalize("NFC", value).casefold()
+            # đ/Đ (U+0111/U+0110) không có decomposition Unicode nên NFD+filter Mn
+            # không bỏ được dấu gạch ngang — phải transliterate riêng, nếu không
+            # metadata chứa "cửa hàng" không khớp term "cua hang" khi lọc.
+            value = value.translate(str.maketrans({"đ": "d"}))
             return "".join(c for c in unicodedata.normalize("NFD", value) if unicodedata.category(c) != "Mn")
 
         folded_terms = [_fold(term) for term in terms]
         allowed = video_ids or {record.video_id for record in self.manifest}
         matched: set[str] = set()
 
-        for record in self.manifest:
-            if record.video_id not in allowed:
-                continue
-            haystack = " ".join(
-                [
-                    *(record.object_labels or []),
-                    record.title or "",
-                    record.description or "",
-                ]
-            )
-            folded_haystack = _fold(haystack)
-            if any(term and term in folded_haystack for term in folded_terms):
-                matched.add(record.video_id)
+        # Stage 1: video-level text (title/description/keywords). O(V) over the
+        # small VideoMetadataStore. Even if the store is empty (legacy manifest
+        # without video_metadata.jsonl), we skip directly to stage 2.
+        store = self.video_metadata
+        if len(store) > 0:
+            for vm in store.all():
+                if vm.video_id not in allowed:
+                    continue
+                haystack = " ".join(
+                    [
+                        vm.title or "",
+                        vm.description or "",
+                        *vm.metadata_keywords,
+                    ]
+                )
+                folded_haystack = _fold(haystack)
+                if any(term and term in folded_haystack for term in folded_terms):
+                    matched.add(vm.video_id)
+
+        # Stage 2: per-frame object labels (objects live on frames, not videos).
+        # We scan the manifest once, but only emit videos NOT already matched by
+        # stage 1 — when stage 1 already covers them we save the per-frame scan
+        # by short-circuiting. Most queries either match no videos (then we
+        # fall back to "return all") or match several; the inner work is small.
+        if not matched:
+            for record in self.manifest:
+                if record.video_id not in allowed:
+                    continue
+                haystack = " ".join(record.object_labels or [])
+                folded_haystack = _fold(haystack)
+                if any(term and term in folded_haystack for term in folded_terms):
+                    matched.add(record.video_id)
 
         # Fallback: no video matched the metadata filter — return everything so we
         # never lose recall because metadata was empty or the term was a paraphrase.
@@ -111,9 +159,26 @@ class RetrievalPipeline:
     def _rrf_fuse(
         self,
         ranked_lists: list[np.ndarray],
-        k: int = _RRF_K,
+        k: int | None = None,
     ) -> dict[int, float]:
-        """Fuse ranked manifest indices using Reciprocal Rank Fusion."""
+        """Fuse ranked manifest indices using Reciprocal Rank Fusion.
+
+        When *k* is ``None`` (the default) it is chosen **adaptively** based on
+        the largest input list length so that small candidate pools — where the
+        classic ``k=60`` compresses the rank contribution ``1/(k+rank+1)`` into a
+        near-constant dynamic range — still preserve discriminative rank weight.
+        Larger pools use ``k`` closer to the standard 60.
+
+        ``k`` is clamped to ``[_RRF_K_MIN, _RRF_K_MAX]`` = ``[1, 60]``.
+        """
+
+        if k is None:
+            max_len = max((len(ids) for ids in ranked_lists), default=0)
+            # Linear interpolation: 0 items → 1, full corpus → 60.
+            # This keeps the reciprocal-rank curve steep for short lists while
+            # matching standard RRF behavior on large ones.
+            k = int(round(_RRF_K_MIN + (_RRF_K_MAX - _RRF_K_MIN) * (max_len / FULL_DATA_CORPUS_TOP_FRAMES)))
+            k = max(_RRF_K_MIN, min(_RRF_K_MAX, k))
 
         fused_scores: dict[int, float] = {}
 
@@ -345,6 +410,8 @@ class RetrievalPipeline:
         top_videos: int | None = None,
         frames_per_video: int | None = None,
         aggregation_top_k: int = 3,
+        keep_frame_scores: bool = False,
+        frame_scores: dict[int, float] | None = None,
     ) -> list[Candidate]:
         """Re-rank frame candidates at the video level (KIS rerank + coarse filter).
 
@@ -369,8 +436,12 @@ class RetrievalPipeline:
            keep a stable ``1e-4`` tiebreak) so the correct video dominates the
            top of the result while the best representative frame leads each video.
 
-        The returned candidates retain every original field; only ``score`` is
-        replaced by the video-aware value so downstream MMR/diversity still works.
+        ``keep_frame_scores`` (used in the *soft* adaptive mode for 2-3 videos)
+        changes step 3: videos are still ordered by ``video_score``, but each
+        frame **keeps its own retrieval score** instead of being overwritten by
+        the video blob. On a small/competing set this preserves the fine-grained
+        RRF order inside the correct video instead of flattening it — the bug that
+        made the single-video sample rank everything as a tie.
         """
 
         if not candidates:
@@ -385,42 +456,30 @@ class RetrievalPipeline:
         for cand in candidates:
             by_video[cand.video_id].append(cand)
 
-        # Sort each video's frames by frame score (desc) before aggregation.
-        for frames in by_video.values():
-            frames.sort(key=lambda c: c.score, reverse=True)
-
-        # Step 1 — aggregate per-frame scores into a single video score.
+        # Aggregate a small number of strongest frames.  This keeps an isolated
+        # high-scoring false frame from outranking a video with consistent visual
+        # evidence, while still limiting the final result per video.
         video_scores: dict[str, float] = {}
         top_k = max(1, aggregation_top_k)
         for video_id, frames in by_video.items():
+            frames.sort(key=lambda c: c.score, reverse=True)
             top = [frame.score for frame in frames[:top_k]]
-            video_scores[video_id] = (
-                float(np.logaddexp.reduce(top)) if top else 0.0
-            )
+            video_scores[video_id] = float(np.logaddexp.reduce(top)) if top else 0.0
 
-        # Step 2 — coarse filter: keep only the top-K videos by video score.
-        ranked_videos = sorted(
-            video_scores,
-            key=lambda vid: video_scores[vid],
-            reverse=True,
-        )
+        ranked_videos = sorted(video_scores, key=video_scores.__getitem__, reverse=True)
         if top_videos is not None and 0 < top_videos < len(ranked_videos):
-            kept = set(ranked_videos[:top_videos])
-        else:
-            kept = set(ranked_videos)
+            ranked_videos = ranked_videos[:top_videos]
 
-        # Step 3 — re-emit frames ordered by video-aware score.
-        reordered: list[Candidate] = []
+        reranked: list[Candidate] = []
         for video_id in ranked_videos:
-            if video_id not in kept:
-                continue
             for rank, frame in enumerate(by_video[video_id][:frames_per_video]):
-                boosted = video_scores[video_id] + rank * 1e-4
-                reordered.append(
-                    frame.model_copy(update={"score": boosted})
-                )
+                if keep_frame_scores:
+                    score = frame_scores.get(frame.vector_id, frame.score) if frame_scores else frame.score
+                else:
+                    score = video_scores[video_id] - rank * 1e-4
+                reranked.append(frame.model_copy(update={"score": score}))
 
-        return reordered
+        return sorted(reranked, key=lambda c: c.score, reverse=True)
 
     def retrieve_trake(
         self,
@@ -430,6 +489,7 @@ class RetrievalPipeline:
         penalty_weight: float = 0.005,
         video_ids: set[str] | None = None,
         coarse_top_k: int = 200,
+        object_adjustment: Callable[[int, int], float] | None = None,
     ) -> list[Candidate]:
         """Rank videos and align one ordered frame to each event.
 
@@ -548,6 +608,15 @@ class RetrievalPipeline:
                 query_matrix
                 @ frame_vectors.T
             )
+            if object_adjustment is not None:
+                for event_index in range(event_count):
+                    similarity_matrix[event_index] += np.asarray(
+                        [
+                            object_adjustment(event_index, int(manifest_index))
+                            for manifest_index in manifest_indices
+                        ],
+                        dtype=np.float32,
+                    )
 
             try:
                 alignment_score, aligned_positions = (
@@ -685,3 +754,103 @@ class RetrievalPipeline:
             candidates=raw_candidates,
             max_answers=max_answers,
         )
+
+    def retrieve_raw_per_video(
+        self,
+        text_embedding: np.ndarray,
+        frames_per_video: int = 10,
+        video_ids: set[str] | None = None,
+    ) -> list[Candidate]:
+        """Vector retrieval returning the top frames PER VIDEO (not one global
+        top-k).
+
+        This guarantees every video contributes its strongest frames, so retrieval
+        scans the WHOLE corpus at the video level — essential when the dataset has
+        many videos and a correct video's best frame may sit beyond a global top-k
+        cutoff (which would otherwise be silently dropped).
+
+        Accelerator: instead of a Python loop + matmul over every video
+        (O(V·F) Python, chậm trên dataset lớn), we issue ONE ANN query over the
+        ENTIRE corpus (FAISS IndexFlatIP / Chroma) with k = num_videos ×
+        frames_per_video, then group by video and keep the top-N per video in
+        NumPy. On a 177k-frame index this drops to ~1 ANN scan (< 50 ms on FAISS)
+        + vectorized per-video top-k.
+        """
+        if frames_per_video <= 0:
+            raise ValueError("frames_per_video must be greater than zero")
+        if not self.manifest:
+            return []
+
+        q = np.asarray(text_embedding, dtype=np.float32)
+        q = q / max(float(np.linalg.norm(q)), 1e-12)
+
+        video_ids_set = set(video_ids) if video_ids else None
+        # Số video cần thăm dự.
+        if video_ids_set is not None:
+            target_videos = [v for v in self._video_to_manifest_indices if v in video_ids_set]
+        else:
+            target_videos = list(self._video_to_manifest_indices)
+        n_videos = len(target_videos)
+        # Lấy đủ frame để mỗi video đều có frames_per_video kết quả. Dùng margin
+        # an toàn vì ANN trả về global top-k (có thể tận dụng nhiều ở 1 vài video).
+        k_pool = min(n_videos * frames_per_video, len(self.manifest))
+        if k_pool <= 0:
+            return []
+
+        ids, scores = self.search_with_filter(q, k_pool, video_ids_set)
+        if len(ids) == 0:
+            return []
+
+        # Group returned manifest indices by video_id, keep top-N per video.
+        # ids/scores align 1-1; sort each video's frame by score, take top-N.
+        by_video: dict[str, list[tuple[float, int]]] = {}
+        manifest = self.manifest
+        for manifest_idx, score in zip(ids, scores):
+            rec = manifest[int(manifest_idx)]
+            by_video.setdefault(rec.video_id, []).append((float(score), int(manifest_idx)))
+
+        candidates: list[Candidate] = []
+        for video_id in target_videos:
+            frames = by_video.get(video_id)
+            if not frames:
+                continue
+            # Top frames_per_video cho video này (đã sắp xếp score giảm dần).
+            frames.sort(key=lambda t: t[0], reverse=True)
+            for score, manifest_idx in frames[:frames_per_video]:
+                rec = manifest[manifest_idx]
+                candidates.append(
+                    Candidate(
+                        video_id=video_id,
+                        frame_id=rec.frame_id,
+                        score=score,
+                        vector_id=rec.vector_id,
+                        keyframe_path=rec.keyframe_path,
+                    )
+                )
+
+        candidates.sort(key=lambda c: c.score, reverse=True)
+        return candidates
+
+    def hybrid_retrieve_raw_full(
+        self,
+        text_query: str,
+        text_embedding: np.ndarray,
+        bm25_index: BM25Index,
+        frames_per_video: int = 10,
+        video_ids: set[str] | None = None,
+        limit: int = 5000,
+    ) -> list[Candidate]:
+        """Full-corpus hybrid retrieval: per-video vector top-k (covers every
+        video) fused with BM25 lexical via RRF. Use when the dataset has many
+        videos and we must not miss any video."""
+        vec_candidates = self.retrieve_raw_per_video(
+            text_embedding, frames_per_video=frames_per_video, video_ids=video_ids
+        )
+        vec_ids = np.asarray(
+            [c.vector_id for c in vec_candidates], dtype=np.int64
+        )
+        bm25_ids, _ = bm25_index.search(
+            text_query, min(len(self.manifest), FULL_DATA_CORPUS_TOP_FRAMES)
+        )
+        fused = self._rrf_fuse([vec_ids, bm25_ids])
+        return self._candidates_from_scores(fused, limit=limit)

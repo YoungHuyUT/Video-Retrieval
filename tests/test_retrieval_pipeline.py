@@ -100,6 +100,20 @@ def test_diversified_retrieval_applies_per_video_limit() -> None:
     assert len(candidates) == 3
 
 
+def test_filtered_search_considers_all_frames_of_allowed_videos() -> None:
+    pipeline = build_pipeline()
+
+    # V002 is below the global top-4 for this query.  A post-filtered global
+    # search would return no V002 result, even though it is the requested video.
+    candidates = pipeline.retrieve_raw(
+        text_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+        top_frames=1,
+        video_ids={"L01_V002"},
+    )
+
+    assert [candidate.video_id for candidate in candidates] == ["L01_V002"]
+
+
 def test_tools_use_diversified_candidates_for_kis() -> None:
     tools = RetrievalTools(
         pipeline=build_pipeline(),

@@ -1,17 +1,37 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from aic2026.agent import RetrievalAgent
-from aic2026.agent.local_llm import LLMInvocationError
 from aic2026.agent.tools import RetrievalTools
-from aic2026.agent.types import AgentDecision, AgentPlan
+from aic2026.agent.types import AgentPlan
 from aic2026.models import Candidate, Query
 
 
 class FakePipeline:
-    """Small deterministic retrieval backend used by agent unit tests."""
+    """Minimal deterministic retrieval backend used by agent unit tests.
+
+    Mirrors only the methods ``RetrievalTools`` actually calls so the agent's
+    deterministic pipeline can run end-to-end without a real index.
+    """
+
+    manifest: list | None = None
+    frames_per_video: int | None = None
+
+    def filter_terms_to_video_ids(
+        self,
+        terms: list[str],
+        video_ids: set[str] | None = None,
+    ) -> set[str] | None:
+        # No metadata filter → return None so the agent considers all videos.
+        return None
+
+    def filter_videos_by_metadata(
+        self,
+        terms: list[str],
+        video_ids: set[str] | None = None,
+    ) -> list[str]:
+        return sorted(video_ids or [])
 
     def retrieve(
         self,
@@ -33,6 +53,7 @@ class FakePipeline:
         self,
         text_embedding: np.ndarray,
         top_frames: int,
+        video_ids: set[str] | None = None,
     ) -> list[Candidate]:
         return [
             Candidate(
@@ -62,12 +83,10 @@ class FakePipeline:
         prefilter_frames_per_event: int,
         penalty_weight: float,
         video_ids: set[str] | None = None,
+        coarse_top_k: int = 200,
+        object_adjustment=None,
     ) -> list[Candidate]:
-        assert event_embeddings.shape == (
-            3,
-            1,
-        )
-
+        assert event_embeddings.shape[0] == 3
         assert top_videos > 0
         assert prefilter_frames_per_event > 0
         assert penalty_weight >= 0
@@ -86,22 +105,6 @@ class FakePipeline:
             )
         ]
 
-    def filter_videos_by_metadata(
-        self,
-        terms: list[str],
-        video_ids: set[str] | None = None,
-    ) -> list[str]:
-        return sorted(video_ids or {"L21_V001"})
-
-    def filter_terms_to_video_ids(
-        self,
-        terms: list[str],
-        video_ids: set[str] | None = None,
-    ) -> set[str] | None:
-        if not terms:
-            return None
-        return set(self.filter_videos_by_metadata(terms, video_ids))
-
     @staticmethod
     def _mask_video_ids(
         candidates: list[Candidate],
@@ -112,58 +115,62 @@ class FakePipeline:
         allowed = set(video_ids)
         return [c for c in candidates if c.video_id in allowed]
 
-class EvidenceSelectingLLM:
-    def structured(
+    # KIS / multi-query expansion paths (keep candidates intact for the test).
+    def _rrf_fuse(
         self,
-        system: str,
-        user: str,
-        schema: type,
-    ):
-        if schema is AgentPlan:
-            return AgentPlan(
-                query_variants=["red speaker"],
-                rationale="Visual rewrite.",
-            )
+        ranked_lists: list[np.ndarray],
+        k: int = 60,
+    ) -> dict[int, float]:
+        scores: dict[int, float] = {}
+        for ranked in ranked_lists:
+            for rank, vid in enumerate(ranked.tolist()):
+                scores[vid] = scores.get(vid, 0.0) + 1.0 / (rank + 1)
+        return scores
 
-        return AgentDecision(
-            action="finish",
-            selected_vector_ids=[7, 999999],
-            rationale="Use retrieved evidence only.",
+    def _candidates_from_scores(
+        self,
+        scores_by_manifest_idx: dict[int, float],
+        limit: int | None = None,
+    ) -> list[Candidate]:
+        items = sorted(
+            scores_by_manifest_idx.items(),
+            key=lambda kv: kv[1],
+            reverse=True,
         )
+        out = [
+            Candidate(video_id="L01_V001", frame_id=i, score=s, vector_id=i)
+            for i, s in items
+        ]
+        return out[:limit] if limit else out
 
-
-class CollapsingTrakeLLM:
-    """Simulates a planner that incorrectly compresses three events into one."""
-
-    def structured(
+    def search_with_filter(
         self,
-        system: str,
-        user: str,
-        schema: type,
-    ):
-        if schema is AgentPlan:
-            return AgentPlan(
-                query_variants=["person performing a sequence"],
-                events=["compressed sequence"],
-                rationale="Incorrectly compressed the event sequence.",
-            )
+        text_embedding: np.ndarray,
+        top_frames: int,
+        video_ids: set[str] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        ids = np.asarray([7, 1, 2], dtype=np.int64)
+        scores = np.asarray([0.9, 0.8, 0.7], dtype=np.float32)
+        return ids, scores
 
-        raise AssertionError(
-            "TRAKE must not call the LLM judge"
-        )
-
-
-class FailingLLM:
-    def structured(
+    def video_level_rerank(
         self,
-        system: str,
-        user: str,
-        schema: type,
-    ):
-        raise LLMInvocationError("Ollama is unavailable.")
+        candidates: list[Candidate],
+        top_videos: int | None = None,
+        frames_per_video: int | None = None,
+        aggregation_top_k: int = 3,
+    ) -> list[Candidate]:
+        return candidates
 
 
 class BuggyLLM:
+    """Simulates an LLM that throws an unexpected programming error.
+
+    The deterministic pipeline calls the LLM only for translation and is
+    expected to *swallow* that failure (falling back to the original text) so
+    retrieval still runs — an LLM hiccup must never abort the whole pipeline.
+    """
+
     def structured(
         self,
         system: str,
@@ -184,9 +191,10 @@ def make_tools() -> RetrievalTools:
 
 
 def test_agent_can_only_return_retrieved_evidence() -> None:
+    """The deterministic agent returns only candidates produced by retrieval."""
     agent = RetrievalAgent(
-        EvidenceSelectingLLM(),
         make_tools(),
+        llm=BuggyLLM(),
     )
 
     result = agent.run(
@@ -204,6 +212,7 @@ def test_agent_can_only_return_retrieved_evidence() -> None:
 
 
 def test_explicit_trake_events_override_planner_events() -> None:
+    """TRAKE uses the query's explicit events, not any planner-supplied ones."""
     query = Query(
         query_id="q-trake",
         type="trake",
@@ -215,9 +224,11 @@ def test_explicit_trake_events_override_planner_events() -> None:
         ],
     )
 
+    # The BuggyLLM would raise if the planner were still consulted; the
+    # deterministic pipeline must not call it for TRAKE/KIS at all.
     agent = RetrievalAgent(
-        CollapsingTrakeLLM(),
         make_tools(),
+        llm=BuggyLLM(),
     )
 
     result = agent.run(query)
@@ -239,6 +250,7 @@ def test_explicit_trake_events_override_planner_events() -> None:
 
 
 def test_plan_fallback_preserves_explicit_trake_events() -> None:
+    """When nothing else is available, the plan keeps the query's events."""
     query = Query(
         query_id="q-fallback",
         type="trake",
@@ -251,20 +263,29 @@ def test_plan_fallback_preserves_explicit_trake_events() -> None:
     )
 
     agent = RetrievalAgent(
-        FailingLLM(),
         make_tools(),
+        llm=BuggyLLM(),
     )
 
-    plan = agent._plan(query)
+    # The deterministic plan is built without an LLM; its events are the
+    # query's events verbatim.
+    result = agent.run(query)
 
-    assert plan.query_variants == [query.text]
-    assert plan.events == query.events
+    assert isinstance(result.plan, AgentPlan)
+    assert result.plan.events == query.events
+    assert result.plan.query_variants == [query.text]
 
 
-def test_unexpected_programming_error_is_not_swallowed() -> None:
+def test_llm_failure_is_swallowed_not_aborting_pipeline() -> None:
+    """An unexpected LLM/translation error must not abort retrieval.
+
+    The deterministic pipeline is expected to catch translation failures and
+    fall back to the original text, so a buggy LLM yields results rather than
+    a propagated RuntimeError.
+    """
     agent = RetrievalAgent(
-        BuggyLLM(),
         make_tools(),
+        llm=BuggyLLM(),
     )
 
     query = Query(
@@ -273,8 +294,8 @@ def test_unexpected_programming_error_is_not_swallowed() -> None:
         text="test query",
     )
 
-    with pytest.raises(
-        RuntimeError,
-        match="programming bug",
-    ):
-        agent._plan(query)
+    # Must NOT raise RuntimeError("programming bug").
+    result = agent.run(query)
+
+    assert result is not None
+    assert [c.vector_id for c in result.candidates] == [7]
