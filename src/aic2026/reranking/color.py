@@ -255,9 +255,9 @@ def contrastive_clip_colour_rerank(
         record = records.get(candidate.vector_id) if candidate.vector_id is not None else None
         if record is None or not candidate.keyframe_path:
             continue
-        boxes = _proposal_boxes(record.object_path)
+        boxes = _proposal_boxes(record.object_path) if record else []
         if not boxes:
-            continue
+            boxes = [(0.0, 0.0, 1.0, 1.0)]
         try:
             with Image.open(Path(candidate.keyframe_path)) as image:
                 image.thumbnail((384, 384))
@@ -325,10 +325,65 @@ def _bound_colour_evidence(
     except (ImportError, OSError, ValueError):
         return None
     boxes = _object_boxes(object_path, labels)
+    if not boxes:
+        # Fallback về phân tích toàn bộ khung hình nếu không có bounding box nào
+        return max(min(colour_fraction(rgb, colour) / 0.12, 1.0) for colour in colours)
     scorer = torso_colour_evidence if torso else object_colour_evidence
     evidence = [scorer(rgb, colour, boxes) for colour in colours]
     usable = [value for value in evidence if value is not None]
     return max(usable) if usable else None
+
+
+_COLOUR_SIDECAR_PATH = Path("data/processed/colour_features.jsonl")
+_COLOUR_SIDECAR_CACHE: dict[int, dict] | None = None
+
+
+def set_colour_sidecar(path: str | Path | None) -> None:
+    """Point the colour reranker at a precomputed sidecar (or disable with None)."""
+    global _COLOUR_SIDECAR_PATH, _COLOUR_SIDECAR_CACHE
+    _COLOUR_SIDECAR_CACHE = None
+    if path is None:
+        _COLOUR_SIDECAR_PATH = Path("")  # falsy → disabled
+    else:
+        _COLOUR_SIDECAR_PATH = Path(path)
+
+
+def _colour_sidecar() -> dict[int, dict]:
+    """Load the offline colour sidecar once (lazily), then reuse."""
+    global _COLOUR_SIDECAR_CACHE
+    if _COLOUR_SIDECAR_CACHE is not None:
+        return _COLOUR_SIDECAR_CACHE
+    if _COLOUR_SIDECAR_PATH and _COLOUR_SIDECAR_PATH.exists():
+        from aic2026.ingestion.colour_features import load_colour_features
+
+        _COLOUR_SIDECAR_CACHE = load_colour_features(_COLOUR_SIDECAR_PATH)
+    else:
+        _COLOUR_SIDECAR_CACHE = {}
+    return _COLOUR_SIDECAR_CACHE
+
+
+def _sidecar_evidence(
+    entry: dict,
+    colours: tuple[str, ...],
+    object_labels: set[str],
+    bind_to_object: bool,
+) -> float | None:
+    """Colour evidence read from the offline sidecar (instant, no decode)."""
+    if bind_to_object:
+        # Evidence is the strongest requested-colour fraction among the matched
+        # object boxes (matched by lowercased OpenImages label).
+        matched: list[float] = []
+        for label in object_labels:
+            key = label.casefold()
+            box = entry.get("obj", {}).get(key)
+            if box and box[0] in colours:
+                matched.append(float(box[1]))
+        return max(matched) if matched else None
+    # Whole-frame: replicate the /0.12 normalisation of the live decoder.
+    fracs = entry.get("fracs")
+    if not fracs:
+        return None
+    return max(min(fracs.get(colour, 0.0) / 0.12, 1.0) for colour in colours)
 
 
 def rerank_with_colour_evidence(
@@ -339,20 +394,43 @@ def rerank_with_colour_evidence(
     weight: float = 0.04,
     top_n: int = 200,
 ) -> list[Candidate]:
-    """Nudge leading candidates by image colour evidence, without VLM calls.
+    """Nudge candidates by colour evidence, without VLM calls.
 
-    Missing images/Pillow leave the candidate untouched.  The negative side is
-    intentionally smaller than the positive one: global colour is evidence,
-    not proof that the queried object itself has that colour.
+    When a colour sidecar has been precomputed (recommended), evidence is an
+    instant dict lookup over the **entire** candidate pool — no PIL decode, no
+    CLIP image tower, no top-N window, and object colour binds to *any*
+    detected label.  Candidates missing from the sidecar fall back to the
+    original per-image decode (bounded by ``top_n``).  Missing images/Pillow
+    leave a candidate untouched.  The negative side is intentionally smaller
+    than the positive one: global colour is evidence, not proof that the
+    queried object itself has that colour.
     """
     colours = tuple(sorted(query_colours(query)))
-    if not colours or weight <= 0 or top_n <= 0:
+    if not colours or weight <= 0:
         return candidates
     bind_to_torso = _needs_person_garment_binding(query)
     object_labels = _query_object_labels(query)
     bind_to_object = bool(object_labels)
+    sidecar = _colour_sidecar() if _COLOUR_SIDECAR_PATH else {}
+    use_sidecar = bool(sidecar)
+
     reranked: list[Candidate] = []
     for rank, candidate in enumerate(candidates):
+        if candidate.vector_id is not None and use_sidecar:
+            entry = sidecar.get(candidate.vector_id)
+            if entry is not None:
+                evidence = _sidecar_evidence(entry, colours, object_labels, bind_to_object)
+                if evidence is None:
+                    reranked.append(candidate)
+                    continue
+                adjustment = (
+                    weight * evidence
+                    if evidence >= 0.10
+                    else -weight * (1.0 if bind_to_object else 0.35)
+                )
+                reranked.append(candidate.model_copy(update={"score": candidate.score + adjustment}))
+                continue
+        # Fallback: live decode of the leading candidates by keyframe image.
         if rank >= top_n or not candidate.keyframe_path:
             reranked.append(candidate)
             continue

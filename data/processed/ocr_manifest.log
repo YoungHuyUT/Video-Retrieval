@@ -1,0 +1,36 @@
+01:52:14 INFO __main__: BẮT ĐẦU ocr-manifest: manifest=data\processed\official_manifest.jsonl output=data\processed\official_manifest_ocr_vi.jsonl lang=vi model=medium prefix=L25
+01:52:27 INFO faiss.loader: Loading faiss with AVX2 support.
+01:52:27 INFO faiss.loader: Could not load library with AVX2 support due to:
+ModuleNotFoundError("No module named 'faiss.swigfaiss_avx2'")
+01:52:27 INFO faiss.loader: Loading faiss.
+01:52:27 INFO faiss.loader: Successfully loaded faiss.
+01:52:35 INFO __main__: OCR tiến độ: 5000/177321 records | images=0 | text-lines=0 → data\processed\official_manifest_ocr_vi.jsonl
+01:52:35 INFO __main__: OCR tiến độ: 10000/177321 records | images=0 | text-lines=0 → data\processed\official_manifest_ocr_vi.jsonl
+01:52:35 INFO __main__: OCR tiến độ: 15000/177321 records | images=0 | text-lines=0 → data\processed\official_manifest_ocr_vi.jsonl
+01:52:36 INFO __main__: OCR tiến độ: 20000/177321 records | images=0 | text-lines=0 → data\processed\official_manifest_ocr_vi.jsonl
+01:52:36 INFO __main__: OCR tiến độ: 25000/177321 records | images=0 | text-lines=0 → data\processed\official_manifest_ocr_vi.jsonl
+13:41:27 INFO __main__: BẮT ĐẦU ocr-manifest: manifest=data\processed\official_manifest.jsonl output=data\processed\official_manifest_ocr_vi.jsonl lang=vi model=medium prefix=L25
+13:42:01 INFO faiss.loader: Loading faiss with AVX2 support.
+13:42:01 INFO faiss.loader: Could not load library with AVX2 support due to:
+ModuleNotFoundError("No module named 'faiss.swigfaiss_avx2'")
+13:42:01 INFO faiss.loader: Loading faiss.
+13:42:01 INFO faiss.loader: Successfully loaded faiss.
+13:42:14 INFO __main__: OCR tiến độ: 5000/177321 records | images=0 | text-lines=0 → data\processed\official_manifest_ocr_vi.jsonl
+13:42:14 INFO __main__: OCR tiến độ: 10000/177321 records | images=0 | text-lines=0 → data\processed\official_manifest_ocr_vi.jsonl
+13:42:14 INFO __main__: OCR tiến độ: 15000/177321 records | images=0 | text-lines=0 → data\processed\official_manifest_ocr_vi.jsonl
+13:42:15 INFO __main__: OCR tiến độ: 20000/177321 records | images=0 | text-lines=0 → data\processed\official_manifest_ocr_vi.jsonl
+13:42:15 INFO __main__: OCR tiến độ: 25000/177321 records | images=0 | text-lines=0 → data\processed\official_manifest_ocr_vi.jsonl
+10:57:36 INFO __main__: BẮT ĐẦU ocr-manifest: manifest=data\processed\_test_ocr_10.jsonl output=data\processed\_test_ocr_10_out.jsonl lang=vi model=medium prefix=L25
+10:58:02 INFO __main__: BẮT ĐẦU ocr-manifest: manifest=data\processed\_test_ocr_10.jsonl output=data\processed\_test_ocr_10_out.jsonl lang=vi model=medium prefix=L25
+10:58:08 INFO faiss.loader: Loading faiss with AVX2 support.
+10:58:08 INFO faiss.loader: Could not load library with AVX2 support due to:
+ModuleNotFoundError("No module named 'faiss.swigfaiss_avx2'")
+10:58:08 INFO faiss.loader: Loading faiss.
+10:58:08 INFO faiss.loader: Successfully loaded faiss.
+11:02:26 INFO __main__: HOÀN TẤT ocr-manifest: 10 records → data\processed\_test_ocr_10_out.jsonl | images=10 | text-lines=49
+11:05:42 INFO __main__: BẮT ĐẦU ocr-manifest: manifest=data\processed\official_manifest.jsonl output=data\processed\official_manifest_ocr_vi.jsonl lang=vi model=medium prefix=L25
+11:05:51 INFO faiss.loader: Loading faiss with AVX2 support.
+11:05:51 INFO faiss.loader: Could not load library with AVX2 support due to:
+ModuleNotFoundError("No module named 'faiss.swigfaiss_avx2'")
+11:05:51 INFO faiss.loader: Loading faiss.
+11:05:51 INFO faiss.loader: Successfully loaded faiss.

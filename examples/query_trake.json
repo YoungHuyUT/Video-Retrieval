@@ -1,0 +1,10 @@
+{
+  "query_id": "trake_demo_001",
+  "type": "trake",
+  "text": "A person enters the room, sits down and starts speaking",
+  "events": [
+    "A person enters the room",
+    "The person sits down",
+    "The person starts speaking"
+  ]
+}

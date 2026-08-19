@@ -11,6 +11,9 @@ from aic2026.models import FrameRecord
 
 # Ngưỡng score tối thiểu để giữ lại object entity (dùng chung với official_index).
 _OBJECT_SCORE_THRESHOLD = 0.3
+# Ngưỡng "có vật thể rõ" — nếu KHÔNG có entity nào đạt ngưỡng này, coi frame là
+# ảnh mờ / không có vật thể đáng tin → object_labels trả rỗng (không lưu gì).
+_OBJECT_PRESENT_THRESHOLD = 0.4
 
 
 @dataclass(slots=True)
@@ -44,7 +47,17 @@ def _metadata(metadata_dir: Path | None, video_id: str) -> tuple[dict, Path | No
 
 
 def _load_object_labels(object_path: Path | None) -> list[str]:
-    """Đọc object JSON (dict chứa mảng song parallel) → entity có score >= threshold."""
+    """Đọc object JSON (dict chứa mảng song parallel) → entity có score >= threshold.
+
+    Quy tắc hai ngưỡng (theo yêu cầu quan sát ảnh mờ):
+    * Một entity chỉ được giữ nếu ``score >= _OBJECT_SCORE_THRESHOLD`` (0.3).
+    * Nhưng nếu TOÀN BỘ frame không có entity nào đạt
+      ``_OBJECT_PRESENT_THRESHOLD`` (0.4) — tức detector coi như ảnh mờ /
+      không có vật thể rõ — thì trả ``[]`` (rỗng). Lúc retrieval, frame có
+      ``object_labels`` rỗng mà query lại hỏi vật thể sẽ bị loại hẳn khỏi
+      candidate, giảm truy xuất đến frame nhiễu. Frame vẫn nằm trong manifest
+      (an toàn cho recall KIS, vì metric là range chứ không exact).
+    """
     if not object_path or not object_path.exists():
         return []
     try:
@@ -64,10 +77,15 @@ def _load_object_labels(object_path: Path | None) -> list[str]:
         except (TypeError, ValueError):
             scores.append(1.0)
     keep: list[str] = []
+    has_strong = False
     for i, ent in enumerate(entities):
         sc = scores[i] if i < len(scores) else 1.0
         if sc >= _OBJECT_SCORE_THRESHOLD:
             keep.append(str(ent))
+        if sc >= _OBJECT_PRESENT_THRESHOLD:
+            has_strong = True
+    if not has_strong:
+        return []
     return sorted(set(keep))
 
 
@@ -190,4 +208,21 @@ def build_manifest(raw_dir: Path, output: Path) -> int:
 
 
 def load_manifest(path: Path) -> list[FrameRecord]:
-    return [FrameRecord.model_validate_json(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line]
+    """Load a JSONL manifest, skipping any line that fails to parse.
+
+    A single corrupted line (e.g. a partial write from an interrupted run, or a
+    hand-edited record) must not abort the whole load — callers like
+    ``ocr-manifest --resume`` re-read their own output, which can contain a
+    truncated final line. Skipping bad lines keeps resume/idempotency safe.
+    """
+    records: list[FrameRecord] = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(FrameRecord.model_validate_json(line))
+        except Exception:
+            # Drop malformed lines rather than failing the entire manifest.
+            continue
+    return records

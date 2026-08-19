@@ -36,22 +36,25 @@ def competition_answer(query: Query, candidate: Candidate) -> dict:
 
 
 def _quote(value: str) -> str:
-    """CSV-quote a Q&A answer only when it contains comma, quote or newline.
+    """Always RFC 4180-quote a Q&A answer.
 
-    Per the AIC brief, simple answers (letters, digits, plain spaces) are NOT
-    wrapped in quotes; quotes are mandatory when the value holds a delimiter,
-    a quote, or a line break. Quotes are escaped by doubling them.
+    Every non-empty Q&A answer is wrapped in double quotes. Internal double
+    quotes are escaped by doubling (``"`` -> ``""``). Embedded newlines and
+    leading/trailing whitespace are preserved verbatim (never trimmed / stripped).
     """
-    if value and any(ch in value for ch in (",", '"', "\n", "\r")):
-        return '"' + value.replace('"', '""') + '"'
-    return value
+    if value is None:
+        value = ""
+    escaped = value.replace('"', '""')
+    return '"' + escaped + '"'
 
 
 def csv_row(query: Query, candidate: Candidate) -> str:
     """One CSV line per the AIC 2026 submission brief.
 
     - KIS:   ``<video_id>,<frame_id>``
-    - Q&A:   ``<video_id>,<frame_id>,<answer>`` (answer quoted only if needed)
+    - Q&A:   ``<video_id>,<frame_id>,<answer>`` (answer always RFC 4180-quoted:
+      wrapped in double quotes, internal quotes doubled, newlines/whitespace
+      preserved, never trimmed)
     - TRAKE: ``<video_id>,<frame_1>,<frame_2>,...,<frame_N>``
     """
     if query.type == "kis":

@@ -31,17 +31,27 @@ def test_csv_row_kis_has_no_whitespace():
     assert csv_row(q, Candidate(video_id="L25_V001", frame_id=23092, score=1.0)) == "L25_V001,23092"
 
 
-def test_csv_row_qa_quotes_only_when_needed():
+def test_csv_row_qa_always_quotes():
     q = Query(query_id="q2", type="qa", text="t")
-    # Answer with a comma MUST be wrapped in double quotes.
-    assert csv_row(q, Candidate(video_id="L01_V028", frame_id=3450, score=1.0, answer="Co 3 nguoi, bao gom nam va nu")) == 'L01_V028,3450,"Co 3 nguoi, bao gom nam va nu"'
-    # Simple answer must NOT be wrapped.
-    assert csv_row(q, Candidate(video_id="L02_V011", frame_id=1200, score=1.0, answer="Nam nguoi")) == "L02_V011,1200,Nam nguoi"
+    # Every Q&A answer is wrapped in double quotes (RFC 4180).
+    # Answer with a comma.
+    assert csv_row(q, Candidate(video_id="L21_V028", frame_id=3450, score=1.0, answer="Co 3 nguoi, bao gom nam va nu")) == 'L21_V028,3450,"Co 3 nguoi, bao gom nam va nu"'
+    # Simple answer is STILL wrapped.
+    assert csv_row(q, Candidate(video_id="L02_V011", frame_id=1200, score=1.0, answer="Nam nguoi")) == 'L02_V011,1200,"Nam nguoi"'
+    # Numeric/string answers still quoted.
+    assert csv_row(q, Candidate(video_id="L01_V005", frame_id=2800, score=1.0, answer="5")) == 'L01_V005,2800,"5"'
 
 
 def test_csv_row_qa_escapes_inner_quotes():
     q = Query(query_id="q2", type="qa", text="t")
     assert csv_row(q, Candidate(video_id="L04_V012", frame_id=4100, score=1.0, answer='Anh ay noi "Tuyet voi"')) == 'L04_V012,4100,"Anh ay noi ""Tuyet voi"""'
+
+
+def test_csv_row_qa_preserves_newlines_and_whitespace():
+    q = Query(query_id="q2", type="qa", text="t")
+    # Embedded newline + leading/trailing spaces must be preserved verbatim.
+    answer = "  Dòng 1\nDòng 2  "
+    assert csv_row(q, Candidate(video_id="L01_V028", frame_id=3450, score=1.0, answer=answer)) == 'L01_V028,3450,"  Dòng 1\nDòng 2  "'
 
 
 def test_csv_row_trake_emits_frame_sequence():

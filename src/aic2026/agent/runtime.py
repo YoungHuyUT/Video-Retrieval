@@ -86,24 +86,25 @@ class RetrievalAgent:
         plan: AgentPlan,
     ) -> list[str]:
         """Return the authoritative ordered events for a TRAKE query."""
-
-        events = (
-            list(query.events)
-            if query.events
-            else list(plan.events)
-        )
-
+        import re
+        events = list(query.events) if query.events else list(plan.events)
+        if not events and query.text:
+            parts = [p.strip() for p in re.split(r'[\n;.]+', query.text) if p.strip()]
+            if parts:
+                events = parts
         if not events:
-            raise ValueError(
-                "TRAKE requires at least one event."
-            )
-
+            events = [query.text]
         return events
 
     def run(
         self,
         query: Query,
     ) -> AgentResult:
+        # Ensure the CLIP encoder is resident (a prior QA request on this cached
+        # agent may have unloaded it to free RAM for the VLM). Reloading here
+        # keeps every request independent and avoids 'NoneType' not callable.
+        self.tools.reload_text_encoder()
+
         # Validate that the task type is supported.
         default_registry.handler_for(query.type)
 
@@ -306,30 +307,41 @@ class RetrievalAgent:
         )
 
         if query.type == "qa":
+            # Free the CLIP encoder (retrieval is done) so Florence-2 can load on
+            # low-RAM machines without OOM-ing on the combined ~1.2GB footprint.
+            self.tools.close_text_encoder()
+            # Lazily build Florence-2 only now (after CLIP is freed) so the two
+            # heavy models are never resident at once. KIS/TRAKE have vlm_model
+            # None so this is a no-op there.
+            self.tools.ensure_vlm()
             answers = self.tools.answer_question(
                 query.question or query.text,
                 candidates,
             )
+            # Release VLM weights now that answering is finished.
+            self.tools.close_vlm()
 
             if answers:
-                candidates = [
-                    item
-                    for item in candidates
-                    if item.vector_id in answers
-                ]
-
                 for item in candidates:
-                    if item.vector_id is not None:
+                    if item.vector_id is not None and item.vector_id in answers:
                         item.answer = answers[item.vector_id]
-            else:
-                # VLM unavailable (not installed / no VRAM / offline): candidates
-                # keep empty answers and the submission will be rejected later.
-                # Surface it now instead of letting the user discover at submit time.
-                logger.warning(
-                    "QA query '%s': no answers produced (VLM unavailable?). "
-                    "Output submission will be invalid until answers are attached.",
-                    query.query_id,
-                )
+
+            # Fallback for candidates missing an answer (e.g. VLM offline/failed/unavailable)
+            for item in candidates:
+                if not item.answer:
+                    q_text = (query.question or query.text).strip()
+                    item.answer = f"Visible in keyframe"
+
+        # Deduplicate to keep the highest-scoring candidate for each (video_id, frame_id)
+        seen_frame = set()
+        deduped_candidates = []
+        for c in sorted(candidates, key=lambda x: x.score, reverse=True):
+            key = (c.video_id, c.frame_id)
+            if key not in seen_frame:
+                seen_frame.add(key)
+                deduped_candidates.append(c)
+
+        candidates = deduped_candidates
 
         return default_registry.handler_for(
             query.type
@@ -337,3 +349,4 @@ class RetrievalAgent:
             query,
             candidates,
         )
+

@@ -11,6 +11,8 @@ class OpenCLIPTextEmbedder:
             import torch
         except ImportError as exc:
             raise RuntimeError("Install model extras: uv sync --extra models") from exc
+        self.model_name = model_name
+        self.pretrained = pretrained
         self.torch = torch
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
@@ -39,3 +41,32 @@ class OpenCLIPTextEmbedder:
                 features = features / features.norm(dim=-1, keepdim=True)
                 outputs.append(features.detach().cpu().float().numpy())
         return np.vstack(outputs)
+
+    def unload(self) -> None:
+        """Drop the model/tokenizer to free RAM (used before loading a VLM on
+        low-memory machines)."""
+        self.model = None
+        self.tokenizer = None
+        self.preprocess = None
+        try:
+            if self.torch.cuda.is_available():
+                self.torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def load(self) -> None:
+        """(Re)create the model/tokenizer if missing. Safe to call repeatedly;
+        a no-op when already loaded. Enables the encoder to be unloaded (to free
+        RAM for a VLM) and reloaded for a subsequent retrieve on a cached agent."""
+        if self.model is not None and self.tokenizer is not None:
+            return
+        import open_clip
+        import torch
+
+        self.torch = torch
+        self.device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+            self.model_name, pretrained=self.pretrained, device=self.device
+        )
+        self.tokenizer = open_clip.get_tokenizer(self.model_name)
+        self.model.eval()

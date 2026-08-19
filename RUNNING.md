@@ -56,6 +56,7 @@ Tạo feature matrix và manifest căn đúng `frame_id`:
 python -m aic2026.cli prepare-official --features "data/raw/CLIP features" --raw-dir data/raw --output-manifest data/processed/official_manifest.jsonl --output-features data/processed/official_features.npy
 ```
 
+
 Kiểm tra số vector khớp manifest:
 
 ```bat
@@ -241,10 +242,10 @@ chạy hai lượt: lượt hai nhận manifest của lượt một làm input n
 
 ```bat
 :: Lượt 1: tiếng Việt (cũng đọc được ký tự Latin cơ bản)
-python -m aic2026.cli ocr-manifest --manifest data/processed/official_manifest.jsonl --output data/processed/official_manifest_ocr_vi.jsonl --keyframes-root data/raw/Keyframes --lang vi --batch-size 16
+python -m aic2026.cli ocr-manifest --manifest data/processed/official_manifest.jsonl --output data/processed/official_manifest_ocr_vi.jsonl --keyframes-root data/raw/Keyframes --lang vi --model-size medium --batch-size 16
 
 :: Lượt 2: tiếng Anh/Latin, gộp thêm vào kết quả lượt 1
-python -m aic2026.cli ocr-manifest --manifest data/processed/official_manifest_ocr_vi.jsonl --output data/processed/official_manifest_ocr.jsonl --keyframes-root data/raw/Keyframes --lang en --batch-size 16
+python -m aic2026.cli ocr-manifest --manifest data/processed/official_manifest.jsonl --output data/processed/official_manifest_ocr_vi.jsonl --keyframes-root data/raw/Keyframes --lang en    --model-size medium --batch-size 16
 ```
 
 Lệnh trên **không ghi đè** `official_manifest.jsonl` gốc. CPU OCR toàn bộ
@@ -265,7 +266,7 @@ các video có `video_id` bắt đầu `L25` (88 video / 37.445 frames).
 
 ```bat
 :: Chỉ OCR L25, hai lượt vi/en, gộp text vào cùng 1 manifest đầu ra
-python -m aic2026.cli ocr-manifest --manifest data/processed/official_manifest.jsonl --output data/processed/official_manifest_ocr_vi.jsonl --keyframes-root data/raw/Keyframes --video-prefix L25 --lang vi --batch-size 16
+python -m aic2026.cli ocr-manifest --manifest data/processed/official_manifest.jsonl --output data/processed/official_manifest_ocr_vi.jsonl --keyframes-root data/raw/Keyframes --video-prefix L25 --lang vi --model-size medium --batch-size 8
 
 python -m aic2026.cli ocr-manifest --manifest data/processed/official_manifest_ocr_vi.jsonl --output data/processed/official_manifest_ocr.jsonl --keyframes-root data/raw/Keyframes --video-prefix L25 --lang en --batch-size 16
 ```

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -12,6 +13,7 @@ from aic2026.ingestion import resolve_feature_sources
 from aic2026.models import Query
 
 app = FastAPI(title="AIC 2026 Agent API", version="0.2.0")
+logger = logging.getLogger(__name__)
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -23,6 +25,36 @@ def home() -> str:
     <ul><li><a href='/docs'>API docs (/docs)</a></li><li><a href='/health'>Health check (/health)</a></li><li><a href='http://127.0.0.1:8501'>Giao diện Streamlit (cần chạy lệnh riêng)</a></li></ul>
     <pre>aic2026 serve
 streamlit run src/aic2026/app/ui.py</pre></body></html>"""
+
+
+# RAM Cache lưu trữ ảnh để giảm thiểu I/O đĩa
+_IMAGE_CACHE: dict[str, bytes] = {}
+
+
+@app.get("/images", include_in_schema=True)
+def get_image(path: str) -> Response:
+    """Trả về file ảnh trực tiếp. Cache lại dạng byte trong RAM để tăng tốc tối đa."""
+    safe_path = Path(path).resolve()
+    if not safe_path.exists():
+        raise HTTPException(404, "Không tìm thấy file ảnh.")
+
+    path_str = str(safe_path)
+    if path_str in _IMAGE_CACHE:
+        return Response(content=_IMAGE_CACHE[path_str], media_type="image/jpeg")
+
+    try:
+        with open(safe_path, "rb") as handle:
+            img_bytes = handle.read()
+    except Exception as exc:
+        raise HTTPException(500, f"Không thể đọc file ảnh: {exc}")
+
+    # Giới hạn kích thước cache khoảng 300 ảnh để tránh OOM
+    if len(_IMAGE_CACHE) > 300:
+        _IMAGE_CACHE.clear()
+
+    _IMAGE_CACHE[path_str] = img_bytes
+    return Response(content=img_bytes, media_type="image/jpeg")
+
 
 
 class RuntimeConfig(BaseModel):
@@ -39,12 +71,18 @@ class RuntimeConfig(BaseModel):
     late_interaction_weight: float = 0.0
     metadata_filter: str = ""
     translate_query: bool = False
-    vlm_backend: str = "ollama"
-    vlm_model: str = "qwen2.5vl:3b"
+    vlm_backend: str = "florence"
+    vlm_model: str = "microsoft/Florence-2-base-ft"
     vlm_device: str | None = None
-    vlm_dtype: str = "bfloat16"
+    vlm_dtype: str = "float32"
     vlm_timeout: int = 120
     coarse_top_k: int = 200
+    # Số video gửi VLM tối đa (top-N video score cao nhất). 0 = tất cả.
+    # Giới hạn này giúp giảm thời gian VLM khi có nhiều candidate video.
+    vlm_top_videos: int = 20
+    # Số thread song song gọi VLM (mỗi video 1 thread). Giảm xuống 3 để tránh
+    # nghẽn Ollama local — Ollama xử lý tuần tự nên thread quá nhiều chỉ tăng queue.
+    vlm_max_workers: int = 3
 
 
 class TaskRequest(BaseModel):
@@ -52,6 +90,13 @@ class TaskRequest(BaseModel):
     text: str = Field(min_length=1)
     question: str | None = None
     events: list[str] = Field(default_factory=list)
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
+
+
+class AnswerRequest(BaseModel):
+    """Phase-2 QA: gửi lại candidates đã retrieve, chỉ chạy VLM để sinh đáp án."""
+    question: str = Field(min_length=1)
+    candidates: list[dict] = Field(default_factory=list)  # Candidate.model_dump() list
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
 
 
@@ -66,13 +111,14 @@ def load_orchestrator(
     chroma_dir: str = "data/indexes/chroma",
     metadata_filter: str = "",
     translate_query: bool = False,
-    vlm_backend: str = "ollama",
+    vlm_backend: str = "florence",
     late_interaction_weight: float = 0.0,
-    vlm_model: str = "qwen2.5vl:3b",
+    vlm_model: str = "microsoft/Florence-2-base-ft",
     vlm_device: str | None = None,
-    vlm_dtype: str = "bfloat16",
+    vlm_dtype: str = "float32",
     vlm_timeout: int = 120,
     coarse_top_k: int = 200,
+    query_type: str | None = None,
 ):
     """Shared layer: index + encoders load once per runtime configuration."""
     from aic2026.agent import OllamaLLM, RetrievalAgent
@@ -111,21 +157,17 @@ def load_orchestrator(
     # adds memory/IDF noise without improving frame selection.
     from aic2026.retrieval import BM25Index
     tools.bm25_index = BM25Index(manifest_records)
-    if vlm_backend != "none" and vlm_model:
-        if vlm_backend == "ollama":
-            from aic2026.qa.vlm_ollama import OllamaVisionModel
-            tools.visual_answerer = OllamaVisionModel(
-                model_name=vlm_model,
-                base_url=ollama_url,
-                timeout_seconds=vlm_timeout,
-            ).answer_question
-        elif vlm_backend == "transformers":
-            from aic2026.qa.vlm import QwenVLM
-            tools.visual_answerer = QwenVLM(
-                model_name=vlm_model,
-                device=vlm_device,
-                torch_dtype=vlm_dtype,
-            ).answer_question
+    # Pass the VLM model id to tools; it is built lazily ONLY on the QA answer
+    # step (after the CLIP encoder is freed) so CLIP + Florence are never both
+    # resident (avoids OOM). For KIS/TRAKE we force "none" so the VLM is never
+    # built/loaded (saves the ~52s + ~600MB Florence load).
+    effective_vlm_backend = vlm_backend
+    if query_type and query_type != "qa":
+        effective_vlm_backend = "none"
+    if effective_vlm_backend != "none" and vlm_model:
+        tools.vlm_model = vlm_model
+        tools.vlm_device = vlm_device
+        tools.vlm_dtype = vlm_dtype
     agent = RetrievalAgent(
         tools,
         llm=OllamaLLM(
@@ -143,9 +185,11 @@ def load_orchestrator(
 
 def run_task(task_type: str, request: TaskRequest) -> AgentResult:
     if task_type == "qa" and not request.question:
-        raise HTTPException(422, "Q&A cần trường question")
+        request.question = request.text
     if task_type == "trake" and not request.events:
-        raise HTTPException(422, "TRAKE cần events theo đúng thứ tự")
+        import re
+        parts = [p.strip() for p in re.split(r'[\n;.]+', request.text) if p.strip()]
+        request.events = parts or [request.text]
     try:
         config = request.runtime
         orchestrator = load_orchestrator(
@@ -164,6 +208,7 @@ def run_task(task_type: str, request: TaskRequest) -> AgentResult:
             vlm_dtype=config.vlm_dtype,
             vlm_timeout=config.vlm_timeout,
             late_interaction_weight=config.late_interaction_weight,
+            query_type=task_type,
         )
         return orchestrator.run(Query(query_id=request.query_id, type=task_type, text=request.text, question=request.question, events=request.events))
     except HTTPException:
@@ -173,7 +218,10 @@ def run_task(task_type: str, request: TaskRequest) -> AgentResult:
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
     except Exception as error:
-        raise HTTPException(500, str(error)) from error
+        # Log the full traceback so the exact failing line is visible in the
+        # server log instead of just the client-facing message.
+        logger.exception("run_task failed for task=%s: %s", task_type, error)
+        raise HTTPException(500, f"{type(error).__name__}: {error}") from error
 
 
 @app.get("/health")
@@ -216,6 +264,108 @@ def run_kis(request: TaskRequest) -> AgentResult:
 def run_qa(request: TaskRequest) -> AgentResult:
     """Q&A flow: plan -> retrieval -> judge -> local VLM/manual answer stage."""
     return run_task("qa", request)
+
+
+@app.post("/tasks/qa/candidates", response_model=AgentResult)
+def run_qa_candidates(request: TaskRequest) -> AgentResult:
+    """Phase-1 QA: chỉ retrieval (CLIP + BM25), không VLM. Trả candidates ngay.
+
+    UI gọi endpoint này trước: hiển thị gallery ảnh ngay (giống KIS), sau đó mới
+    gọi /tasks/qa/answers để điền đáp án từ VLM mà không block UI.
+    """
+    if not request.question:
+        request.question = request.text
+    try:
+        config = request.runtime
+        orchestrator = load_orchestrator(
+            config.manifest_path,
+            config.features_path,
+            config.clip_pretrained,
+            config.llm_model,
+            config.ollama_url,
+            backend=config.backend,
+            chroma_dir=config.chroma_dir,
+            metadata_filter=config.metadata_filter,
+            translate_query=config.translate_query,
+            # VLM không cần cho phase-1: truyền vlm_backend="none" để bỏ qua
+            vlm_backend="none",
+            vlm_model=config.vlm_model,
+            vlm_device=config.vlm_device,
+            vlm_dtype=config.vlm_dtype,
+            vlm_timeout=config.vlm_timeout,
+            late_interaction_weight=config.late_interaction_weight,
+            query_type="qa",
+        )
+        # Phase-1 QA: retrieval only, no VLM. We pass vlm_backend="none" above so
+        # tools.vlm_model is unset and ensure_vlm() is a no-op in _finalize — no
+        # need to null the callables (that previously corrupted the cached agent).
+        query = Query(
+            query_id=request.query_id,
+            type="qa",
+            text=request.text,
+            question=request.question,
+            events=request.events,
+        )
+        return orchestrator.run(query)
+    except HTTPException:
+        raise
+    except FileNotFoundError as error:
+        raise HTTPException(503, str(error)) from error
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    except Exception as error:
+        raise HTTPException(500, str(error)) from error
+
+
+@app.post("/tasks/qa/answers")
+def run_qa_answers(request: AnswerRequest) -> dict[str, str]:
+    """Phase-2 QA: nhận candidates đã có, chạy VLM song song. Trả {vector_id: answer}.
+
+    Chỉ xử lý top-N video (config.vlm_top_videos) theo score giảm dần để kiểm soát
+    thời gian VLM. Số thread song song: config.vlm_max_workers.
+    """
+    from aic2026.models import Candidate
+
+    config = request.runtime
+
+    if not config.vlm_backend or config.vlm_backend == "none":
+        return {}
+
+    # Parse candidates từ dict
+    try:
+        candidates = [Candidate.model_validate(c) for c in request.candidates]
+    except Exception as exc:
+        raise HTTPException(422, f"candidates không hợp lệ: {exc}") from exc
+
+    if not candidates:
+        return {}
+
+    # Giới hạn top-N video đưa vào VLM
+    if config.vlm_top_videos and config.vlm_top_videos > 0:
+        seen_videos: set[str] = set()
+        top_candidates: list[Candidate] = []
+        for c in sorted(candidates, key=lambda x: x.score, reverse=True):
+            if c.video_id not in seen_videos:
+                seen_videos.add(c.video_id)
+                if len(seen_videos) > config.vlm_top_videos:
+                    break
+            top_candidates.append(c)
+        candidates = top_candidates
+
+    try:
+        from aic2026.qa.florence import FlorenceVLM
+
+        florence = FlorenceVLM(
+            model_name=config.vlm_model,
+            device=config.vlm_device,
+            torch_dtype=config.vlm_dtype,
+        )
+        answers = florence.answer_question(request.question, candidates)
+    except Exception as error:
+        raise HTTPException(500, str(error)) from error
+
+    # Trả về string key (JSON không hỗ trợ int key)
+    return {str(k): v for k, v in answers.items()}
 
 
 @app.post("/tasks/trake/run", response_model=AgentResult)

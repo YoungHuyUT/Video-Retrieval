@@ -1,0 +1,5 @@
+D:\MinhHuy\AIC2026\.venv\Lib\site-packages\transformers\utils\hub.py:106: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+D:\MinhHuy\AIC2026\.venv\Lib\site-packages\open_clip\factory.py:450: UserWarning: QuickGELU mismatch between final model config (quick_gelu=False) and pretrained tag 'openai' (quick_gelu=True).
+  warnings.warn(
+EXIT=124

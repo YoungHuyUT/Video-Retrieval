@@ -8,6 +8,110 @@ from aic2026.agent.types import AgentPlan
 from aic2026.models import Candidate, Query
 
 
+def test_cached_agent_handles_consecutive_qa_requests() -> None:
+    """Regression: a cached agent (lru_cache in api.py) must survive multiple
+    QA requests. The first QA request unloads CLIP + Florence to free RAM; the
+    second request must reload the encoder (reload_text_encoder in run()) instead
+    of crashing with ``'NoneType' object is not callable'``.
+
+    We use a fake encoder that raises once its underlying model is unloaded, and
+    a fake VLM that records load/close, to exercise the exact free→reload path
+    without loading multi-hundred-MB models.
+    """
+    unloaded = {"encoder": False, "encoder_reloaded": False, "vlm_loads": 0, "vlm_closes": 0}
+
+    class FakeEncoder:
+        model = object()
+
+        def unload(self) -> None:
+            unloaded["encoder"] = True
+            self.model = None
+
+        def load(self) -> None:
+            if self.model is None:
+                self.model = object()
+                unloaded["encoder_reloaded"] = True
+
+        def encode(self, text: str) -> np.ndarray:
+            if self.model is None:
+                raise RuntimeError("encoder unloaded — callable must be reloaded")
+            return np.asarray([1.0], dtype=np.float32)
+
+    class FakeVLM:
+        available = False
+
+        def load(self) -> None:
+            self.available = True
+            unloaded["vlm_loads"] += 1
+
+        def close(self) -> None:
+            self.available = False
+            unloaded["vlm_closes"] += 1
+
+        def answer_question(self, question, candidates):
+            return {c.vector_id: "ok" for c in candidates if c.vector_id is not None}
+
+    enc = FakeEncoder()
+    vlm = FakeVLM()
+
+    class FakePipeline:
+        manifest = None
+
+        def filter_terms_to_video_ids(self, terms, video_ids=None):
+            return None
+
+        def prefixes_to_video_ids(self, prefixes, video_ids=None):
+            return None
+
+        def filter_videos_by_metadata(self, terms, video_ids=None):
+            return sorted(video_ids or [])
+
+        def retrieve(self, text_embedding, top_frames, max_answers, video_ids=None):
+            return [Candidate(video_id="L01_V001", frame_id=505, score=0.9, vector_id=7)]
+
+        def retrieve_raw(self, text_embedding, top_frames, video_ids=None):
+            return [Candidate(video_id="L01_V001", frame_id=505, score=0.9, vector_id=7)]
+
+        def video_level_rerank(self, candidates, top_videos=None, frames_per_video=None, aggregation_top_k=3):
+            return candidates
+
+    tools = RetrievalTools(
+        FakePipeline(),
+        encode_text=enc.encode,
+        vlm_model="fake-model",
+    )
+    # Inject the fake VLM so ensure_vlm/answer_question use it without importing
+    # the real (heavy) Florence wrapper.
+    tools.visual_answerer = vlm.answer_question
+    tools.visual_answerer_obj = vlm
+
+    agent = RetrievalAgent(tools)
+
+    # Simulate the QA _finalize path manually: close encoder, ensure+answer, close vlm
+    q1 = Query(query_id="q1", type="qa", text="red speaker", question="What color?")
+    tools.close_text_encoder()
+    tools.ensure_vlm()
+    _ = tools.answer_question(q1.question, [Candidate(video_id="L01_V001", frame_id=505, score=0.9, vector_id=7)])
+    tools.close_vlm()
+
+    assert unloaded["encoder"] is True  # encoder was freed after request 1
+    assert unloaded["vlm_closes"] == 1  # vlm closed after request 1
+
+    # Second QA request on the SAME (cached) agent — this used to raise
+    # 'NoneType' object is not callable because encode_text was nulled out.
+    q2 = Query(query_id="q2", type="qa", text="blue screen", question="What is shown?")
+    result = agent.run(q2)  # run() calls reload_text_encoder() first
+
+    assert result is not None
+    assert [c.vector_id for c in result.candidates] == [7]
+    # The encoder must have been reloaded for request 2 (reload_text_encoder
+    # in run()), proving the callable was NOT left as None. We check the flag
+    # set by FakeEncoder.load() rather than enc.model (which is unloaded again
+    # at the end of request 2's _finalize to free RAM).
+    assert unloaded["encoder_reloaded"] is True
+    assert unloaded["vlm_loads"] >= 1
+
+
 class FakePipeline:
     """Minimal deterministic retrieval backend used by agent unit tests.
 
@@ -65,23 +169,11 @@ class FakePipeline:
     ) -> list[Candidate]:
         return [
             Candidate(
-                video_id="L21_V001",
-                frame_id=100,
-                score=0.95,
-                vector_id=1,
-            ),
-            Candidate(
-                video_id="L21_V001",
-                frame_id=200,
+                video_id="L01_V001",
+                frame_id=505,
                 score=0.90,
-                vector_id=2,
-            ),
-            Candidate(
-                video_id="L21_V001",
-                frame_id=300,
-                score=0.85,
-                vector_id=3,
-            ),
+                vector_id=7,
+            )
         ]
 
     def retrieve_trake(
@@ -93,6 +185,7 @@ class FakePipeline:
         video_ids: set[str] | None = None,
         coarse_top_k: int = 200,
         object_adjustment=None,
+        object_adjustment_matrices=None,
         preferred_prefixes: list[str] | None = None,
     ) -> list[Candidate]:
         assert event_embeddings.shape[0] == 3
@@ -308,3 +401,24 @@ def test_llm_failure_is_swallowed_not_aborting_pipeline() -> None:
 
     assert result is not None
     assert [c.vector_id for c in result.candidates] == [7]
+
+
+def test_openclip_reload_after_unload_keeps_encode_callable() -> None:
+    """Regression for the real NoneType bug: OpenCLIPTextEmbedder.__init__ did
+    NOT store self.model_name/self.pretrained, so load() raised AttributeError
+    and reload_text_encoder() silently failed -- the next request's retrieve()
+    then called encode() on a None model -> 'NoneType' object has no attribute
+    'encode_text'. Confirm unload -> load -> encode works with the real encoder.
+    """
+    from aic2026.embeddings import OpenCLIPTextEmbedder
+
+    enc = OpenCLIPTextEmbedder()
+    before = enc.encode("a person speaking")
+    assert before.shape[0] == 512
+    enc.unload()
+    assert enc.model is None
+    enc.load()  # previously raised AttributeError: model_name
+    assert enc.model is not None
+    after = enc.encode("a person presenting")
+    assert after.shape[0] == 512
+    assert not (before == after).all()

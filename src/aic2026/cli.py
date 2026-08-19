@@ -2,7 +2,21 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
 from pathlib import Path
+
+# Windows console defaults to a legacy code page (cp1252) that cannot encode
+# Vietnamese (or any non-Latin) output, which makes every `typer.echo` of a
+# progress message crash with UnicodeEncodeError. Force UTF-8 on the std
+# streams so the CLI is runnable on Windows terminals as well as Colab/Linux.
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (OSError, ValueError):
+    pass
 
 import typer
 
@@ -13,6 +27,35 @@ from aic2026.models import Candidate, GroundTruth, Query
 logger = logging.getLogger(__name__)
 
 app = typer.Typer(help="AIC 2026 retrieval toolkit")
+
+
+def _setup_run_logging(log_file: Path) -> None:
+    """Cấu hình logging ghi LIÊN TỤC ra file (và console) để theo dõi lúc chạy.
+
+    Không đợi chạy xong mới ghi — mỗi ``logger.info`` được flush ngay vào file,
+    nên user có thể ``tail``/mở file log bất cứ lúc nào để xem tiến độ.
+    """
+    log_file = Path(log_file)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(log_file, encoding="utf-8", delay=False)
+    file_handler.setLevel(logging.INFO)
+    # dòng format có timestamp để dễ biết đang ở thời điểm nào.
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", "%H:%M:%S")
+    )
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    # Tránh nhân đôi handler mỗi lần gọi lệnh.
+    if not any(isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == str(log_file.resolve())
+               for h in root.handlers):
+        root.addHandler(file_handler)
+    # Console handler để vẫn thấy trên terminal.
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+               for h in root.handlers):
+        stream = logging.StreamHandler()
+        stream.setLevel(logging.INFO)
+        stream.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s", "%H:%M:%S"))
+        root.addHandler(stream)
 
 @app.command()
 def prepare(raw_dir: Path = typer.Option(Path("data/raw")), output: Path = typer.Option(Path("data/processed/manifest.jsonl"))) -> None:
@@ -102,7 +145,7 @@ def embed_keyframes(
         from aic2026.models import FrameRecord
         from aic2026.qa.ocr import OCRTextExtractor
 
-        extractor = OCRTextExtractor(lang=ocr_lang)
+        extractor = OCRTextExtractor(lang=ocr_lang, correct=True)
         extractor._ensure_loaded()
         if extractor._ocr is None:
             typer.echo("paddleocr chưa được cài — bỏ qua OCR (cài: uv sync --extra models, cộng paddlepaddle).")
@@ -148,8 +191,13 @@ def prepare_official(
     raw_dir: Path = typer.Option(Path("data/raw"), help="Gốc dữ liệu chứa Keyframes/Objects/Metadata"),
     output_manifest: Path = typer.Option(Path("data/processed/official_manifest.jsonl")),
     output_features: Path = typer.Option(Path("data/processed/official_features.npy")),
+    log_file: Path = typer.Option(
+        Path("data/processed/prepare_official.log"),
+        help="File log tiến độ LIÊN TỤC (ghi từng video, không đợi xong). Mở/tail bất cứ lúc nào để theo dõi.",
+    ),
 ) -> None:
     """Build manifest + aligned .npy từ CLIP features BTC chính thức (thứ tự khớp keyframe)."""
+    _setup_run_logging(log_file)
     from aic2026.data_platform import inspect_official_assets
     from aic2026.ingestion.official_index import build_official_index
     # Fail fast if the map-keyframes CSV (nguồn frame_idx gốc của video) is
@@ -165,8 +213,46 @@ def prepare_official(
             "TRAKE cần tọa độ frame gốc; thiếu CSV sẽ sinh manifest sai tọa độ. "
             "Hãy giải nén ZIP hỗ trợ BTC vào data/raw (vd map-keyframes-aic25-b1)."
         )
+    logger.info("BẮT ĐẦU prepare-official: manifest=%s features=%s", output_manifest, features)
     count = build_official_index(raw_dir, features, output_manifest, output_features)
+    logger.info("HOÀN TẤT prepare-official: %d records", count)
     typer.echo(f"Wrote {count} records to {output_manifest} and {output_features}")
+
+
+@app.command("compute-colour-features")
+def compute_colour_features(
+    manifest: Path = typer.Option(
+        Path("data/processed/official_manifest.jsonl"),
+        help="Manifest JSONL (có keyframe_path + object_path mỗi record).",
+    ),
+    raw_dir: Path = typer.Option(Path("data/raw"), help="Gốc dữ liệu chứa Keyframes/Objects."),
+    output: Path = typer.Option(
+        Path("data/processed/colour_features.jsonl"),
+        help="Output sidecar JSONL (key vector_id).",
+    ),
+    limit: int = typer.Option(0, help="Chỉ xử lý N record đầu (dev; 0 = toàn bộ)."),
+) -> None:
+    """Precompute offline colour evidence per keyframe.
+
+    CLIP toàn cảnh gần như 'mù màu', nên truy vấn như 'xe đỏ' và 'xe xanh'
+    trả kết quả gần như giống nhau. Bước rerank màu gốc giải quyết bằng cách
+    decode ảnh keyframe mỗi lần query — chậm và chỉ xét top-N. Lệnh này
+    chuyển toàn bộ công việc pixel sang một lần chạy offline, ghi một sidecar
+    nhẹ (vector_id → {dom, fracs, obj}); query chỉ là dict lookup tức thì,
+    áp dụng cho toàn bộ candidate pool, và bind màu với bất kỳ object nào.
+
+    Chạy một lần trước khi serve; rerank sẽ tự động dùng sidecar nếu tồn tại.
+    """
+    from aic2026.ingestion.colour_features import build_colour_features
+
+    count = build_colour_features(
+        manifest_path=manifest,
+        keyframes_root=raw_dir / "Keyframes",
+        objects_root=raw_dir / "Objects",
+        output_path=output,
+        limit=limit,
+    )
+    typer.echo(f"Wrote {count} colour-feature records to {output}")
 
 @app.command("build-from-clip")
 def build_from_clip_cmd(
@@ -296,20 +382,24 @@ def _run_ocr(
     keyframes_root: Path,
     batch_size: int,
     progress_label: str = "OCR keyframes",
-) -> tuple[list, int, int]:
-    """OCR a list of FrameRecords, merging recognized text into object_labels.
+):
+    """OCR a list of FrameRecords, yielding each enriched record lazily.
 
-    Returns (enriched_records, found_images, recognized_lines). The progress bar
-    is intentionally plain (no ETA) because the first batches are dominated by
-    Paddle/MKLDNN warmup, which would otherwise show a wildly wrong ETA like
-    "1504d". ETA appears and stabilizes after warmup.
+    Là **generator**: mỗi batch OCR xong là yield ngay record đã enrich (theo
+    đúng thứ tự đầu vào), kèm thống kê (found_images, recognized_lines) của
+    record đó. Caller có thể ghi liền từng dòng ra file (streaming) thay vì giữ
+    hết trong RAM — nên nếu chạy hàng giờ mà bị ngắt giữa chừng, file output vẫn
+    chứa những gì đã OCR xong (không mất trắng như bản cũ ghi 1 lần ở cuối).
+
+    Yield: ``(enriched_record, found_images_increment, recognized_lines_increment)``.
+
+    The progress bar is intentionally plain (no ETA) because the first batches
+    are dominated by Paddle/MKLDNN warmup, which would otherwise show a wildly
+    wrong ETA like "1504d". ETA appears and stabilizes after warmup.
     """
     from aic2026.models import FrameRecord
 
-    enriched: list[FrameRecord] = []
     total = len(records)
-    found_images = 0
-    recognized_lines = 0
     typer.echo(f"OCR bắt đầu: {total:,} manifest records | lang={extractor.lang} | model={extractor.model_size}")
     with typer.progressbar(length=total, label=progress_label, show_percent=True, show_pos=True) as progress:
         for start in range(0, total, batch_size):
@@ -328,25 +418,33 @@ def _run_ocr(
             text_iter = iter(batch_texts)
             for record, chosen in zip(record_batch, resolved):
                 texts = next(text_iter) if chosen is not None else []
-                if chosen is not None:
-                    found_images += 1
-                recognized_lines += len(texts)
+                found = 1 if chosen is not None else 0
+                lines = len(texts)
                 merged = list(dict.fromkeys([*(record.object_labels or []), *texts]))
-                enriched.append(record.model_copy(update={"object_labels": merged}))
+                # Mark OCR-complete so a resumed run can skip this frame. The
+                # flag survives the streaming write below and is re-read on the
+                # next invocation, so an interrupted run loses nothing.
+                enriched = record.model_copy(update={"object_labels": merged, "ocr_done": True})
                 progress.update(1)
-    return enriched, found_images, recognized_lines
+                yield enriched, found, lines
 
 
 @app.command("ocr-manifest")
 def ocr_manifest(
-    manifest: Path = typer.Option(Path("data/processed/derived_manifest.jsonl"), help="Manifest JSONL input"),
+    manifest: Path = typer.Option(Path("data/processed/official_manifest.jsonl"), help="Manifest JSONL input (mặc định official — file có sẵn; dùng derived_manifest.jsonl nếu đã encode keyframe Chế độ A)"),
     output: Path | None = typer.Option(None, help="Manifest JSONL output. Mặc định ghi đè (in-place) vào --manifest để agent-query tự dùng."),
     keyframes_root: Path = typer.Option(Path("data/raw/Keyframes"), help="Gốc chứa thư mục keyframe để resolve đường dẫn tương đối"),
     batch_size: int = typer.Option(16, min=1),
     lang: str = typer.Option("vi", help="Ngôn ngữ OCR: vi | en"),
     model_size: str = typer.Option("medium", help="PP-OCRv6 checkpoint: medium (chuẩn, chính xác) | mobile (nhanh 3–5x, hơi kém chính xác)"),
+    correct: bool = typer.Option(True, help="Chạy post-correction Tiếng Việt (sửa dấu vỡ, rn→m, lọc token rác) sau OCR. Tắt nếu muốn text thô."),
+    resume: bool = typer.Option(False, help="Tiếp tục từ chỗ dở: bỏ qua các record đã có flag ocr_done=True trong output cũ (không OCR lại). Dùng khi chạy bị ngắt giữa chừng."),
     shard_count: int = typer.Option(1, min=1, help="Chia manifest thành N shard để chạy song song nhiều process (CPU). Dùng cùng --shard-id."),
     shard_id: int = typer.Option(0, min=0, help="Shard thứ i (0-based) khi chạy song song. Bình thường = 0."),
+    log_file: Path = typer.Option(
+        Path("data/processed/ocr_manifest.log"),
+        help="File log tiến độ LIÊN TỤC (ghi từng record, không đợi xong). Mở/tail bất cứ lúc nào để theo dõi OCR.",
+    ),
     video_prefix: str = typer.Option("", help="CHỈ OCR các video có tiền tố video_id này (vd: L25 — khóa học onl có bảng biểu). Để trống = OCR hết. Các video KHÔNG khớp vẫn được ghi nguyên vào output (không OCR, không drop)."),
 ) -> None:
     """OCR toàn bộ keyframe trong manifest, ghi text nhận dạng vào object_labels (build 1 lần).
@@ -360,6 +458,9 @@ def ocr_manifest(
     ``<output>.<shard_id>``. Sau khi N process xong, gộp bằng ``ocr-merge-shards``.
     Ví dụ trên máy 8 nhân: --shard-count 8, chạy 8 terminal/lệnh song song.
     """
+    _setup_run_logging(log_file)
+    logger.info("BẮT ĐẦU ocr-manifest: manifest=%s output=%s lang=%s model=%s prefix=%s",
+                manifest, output, lang, model_size, video_prefix or "(all)")
     if shard_count > 1 and output is None:
         typer.echo("--shard-count > 1 yêu cầu --output (để ghi từng shard riêng, không ghi đè manifest).")
         raise typer.Exit(code=1)
@@ -404,7 +505,7 @@ def ocr_manifest(
         ocr_records = records
         passthrough = []
 
-    extractor = OCRTextExtractor(lang=lang, model_size=model_size)
+    extractor = OCRTextExtractor(lang=lang, model_size=model_size, correct=correct)
     extractor._ensure_loaded()
     if extractor._ocr is None:
         typer.echo(
@@ -413,43 +514,108 @@ def ocr_manifest(
         )
         raise typer.Exit(code=1)
 
-    ocr_enriched, found_images, recognized_lines = _run_ocr(
-        ocr_records, extractor, keyframes_root, batch_size, progress_label=progress_label
-    )
-    # Gộp toàn bộ: GIỮ NGUYÊN thứ tự manifest gốc. vector_id của mỗi record phải
-    # khớp với dòng thứ tự tương ứng trong file feature .npy (được build theo
-    # đúng thứ tự manifest), nên ta không được xáo trộn thứ tự. Record khớp
-    # --video-prefix dùng bản đã OCR; record còn lại giữ nguyên (không OCR).
-    if passthrough:
-        enriched_by_id = {r.vector_id: r for r in ocr_enriched}
-        enriched = [
-            enriched_by_id.get(record.vector_id, record)
-            for record in records
-        ]
+    # --resume: nếu lần chạy trước (có thể bị ngắt giữa chừng) đã ghi một phần
+    # output mang flag ocr_done=True, load output đó và đánh dấu những record
+    # đó để bỏ qua — không OCR lại. Hoạt động cả với --output riêng và in-place
+    # (output == manifest). Luôn load từ bản ghi đầy đủ (manifest gốc) làm
+    # nguồn record, chỉ mượn ocr_done từ output để biết frame nào xong rồi.
+    if resume and ocr_records:
+        prev_path = output if output is not None else manifest
+        if os.path.exists(prev_path):
+            from aic2026.ingestion import load_manifest as _load
+            prev = _load(prev_path)
+            done_ids = {r.vector_id for r in prev if getattr(r, "ocr_done", False)}
+            if done_ids:
+                before = len(ocr_records)
+                ocr_records = [r for r in ocr_records if r.vector_id not in done_ids]
+                passthrough = [r for r in records
+                               if not any(r.video_id.startswith(p) for p in ocr_prefixes)] + \
+                             [r for r in records
+                               if any(r.video_id.startswith(p) for p in ocr_prefixes)
+                               and r.vector_id in done_ids]
+                typer.echo(
+                    f"RESUME: bỏ qua {len(done_ids):,} record đã OCR xong; "
+                    f"{len(ocr_records):,} record còn lại cần OCR."
+                )
+
+    # PRE-FLIGHT: đếm số ảnh THỰC SỰ resolve được trong số record sẽ OCR TRƯỚC
+    # khi chạy. Nếu = 0 mà vẫn còn record cần OCR, dừng ngay với hướng dẫn — tránh
+    # kịch bản Colab cũ: chạy hàng giờ qua 177k record mà images=0 (đường dẫn
+    # keyframe không khớp) rồi ra manifest rỗng.
+    if ocr_records:
+        resolved_sample = sum(
+            1 for r in ocr_records
+            if _resolve_keyframe_path(r, keyframes_root) is not None
+        )
+        typer.echo(
+            f"PRE-FLIGHT: {resolved_sample:,}/{len(ocr_records):,} ảnh L25 resolve được "
+            f"tại keyframes_root={keyframes_root}"
+        )
+        if resolved_sample == 0:
+            typer.echo(
+                "❌ PRE-FLIGHT FAILED: không resolve được ảnh nào. Đường dẫn keyframe "
+                "sai hoặc keyframes_root không chứa ảnh. Kiểm tra:\n"
+                f"  - keyframes_root hiện tại: {keyframes_root}\n"
+                "  - manifest lưu keyframe_path dạng gì (vd data/raw/Keyframes/...)\n"
+                "  - ảnh có nằm ở keyframes_root/<video_id>/<tên_file>.jpg không\n"
+                "Script sẽ thoát để không lãng phí thời gian. Sửa keyframes_root rồi chạy lại."
+            )
+            raise typer.Exit(code=1)
     else:
-        enriched = ocr_enriched
+        typer.echo("Không có record nào cần OCR (đã xong hết hoặc prefix không khớp).")
+
+    # GHI STREAMING (từng record) giữ NGUYÊN thứ tự manifest gốc. vector_id của
+    # mỗi record phải khớp dòng tương ứng trong .npy (build theo đúng thứ tự),
+    # nên không xáo trộn. Record khớp --video-prefix (hoặc thuộc shard này) dùng
+    # bản đã OCR; record còn lại ghi nguyên (không OCR). Ghi liền + flush mỗi
+    # 5000 dòng → nếu ngắt giữa chừng, file output vẫn chứa những gì đã OCR xong.
+    ocr_ids = {r.vector_id for r in ocr_records}
+    ocr_iter = _run_ocr(ocr_records, extractor, keyframes_root, batch_size, progress_label=progress_label)
+    found_images = 0
+    recognized_lines = 0
+    written = 0
+    total = len(records)
 
     target = output if output is not None else manifest
     if shard_count > 1:
         # Mỗi shard ghi file riêng để không đè lên nhau; gộp sau bằng ocr-merge-shards.
         target = output.with_suffix(f".shard{shard_id}{output.suffix}")
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(r.model_dump_json() for r in enriched) + ("\n" if enriched else ""), encoding="utf-8")
+    with target.open("w", encoding="utf-8") as mf:
+        for record in records:
+            if record.vector_id in ocr_ids:
+                enriched, found, lines = next(ocr_iter)
+                found_images += found
+                recognized_lines += lines
+                mf.write(enriched.model_dump_json() + "\n")
+            else:
+                mf.write(record.model_dump_json() + "\n")
+            written += 1
+            # Flush định kỳ + log tiến độ LIÊN TỤC (mở/tail file bất cứ lúc nào).
+            if written % 5000 == 0:
+                mf.flush()
+                logger.info(
+                    "OCR tiến độ: %d/%d records | images=%d | text-lines=%d → %s",
+                    written, total, found_images, recognized_lines, target,
+                )
+        mf.flush()
     if shard_count > 1:
         typer.echo(
-            f"OCR shard {shard_id} xong: wrote {len(enriched):,} records to {target} "
+            f"OCR shard {shard_id} xong: wrote {written:,} records to {target} "
             f"| images={found_images:,} | text-lines={recognized_lines:,}"
         )
     elif output is None:
         typer.echo(
-            f"OCR hoàn tất: wrote {len(enriched):,} records IN-PLACE to {target} "
+            f"OCR hoàn tất: wrote {written:,} records IN-PLACE to {target} "
             f"| images={found_images:,} | text-lines={recognized_lines:,}"
         )
     else:
         typer.echo(
-            f"OCR hoàn tất: wrote {len(enriched):,} records to {target} "
+            f"OCR hoàn tất: wrote {written:,} records to {target} "
             f"| images={found_images:,} | text-lines={recognized_lines:,}"
         )
+    logger.info("HOÀN TẤT ocr-manifest: %d records → %s | images=%d | text-lines=%d",
+                written, target, found_images, recognized_lines)
 
 
 @app.command("ocr-merge-shards")
@@ -491,12 +657,16 @@ def agent_query(
     backend: str = typer.Option("faiss", help="Index backend: faiss (mặc định) | numpy | chroma"),
     chroma_dir: Path = typer.Option(Path("data/indexes/chroma"), help="Thư mục Chroma (chỉ dùng khi backend=chroma)"),
     metadata_filter: str = typer.Option("", help="Từ khóa metadata cách nhau dấu phẩy để lọc video TRƯỚC retrieval (vd: cửa hàng,siêu thị). Để trống = không lọc."),
-    vlm_backend: str = typer.Option("ollama", help="Backend VLM cho Q&A: ollama | transformers | none"),
-    vlm_model: str = typer.Option("qwen2.5vl:3b", help="Model VLM cho Q&A (tên model trên Ollama; để trống để tắt)"),
-    vlm_device: str | None = typer.Option(None, help="Device VLM khi backend=transformers (mặc định auto)"),
-    vlm_dtype: str = typer.Option("bfloat16", help="Precision VLM khi backend=transformers: bfloat16 | float16 | float32"),
-    vlm_timeout: int = typer.Option(120, help="Timeout (giây) mỗi lần gọi VLM qua Ollama (backend=ollama)"),
+    vlm_backend: str = typer.Option("florence", help="Backend VLM cho Q&A: florence | none (Florence-2 thay thế QwenVLM/Ollama)"),
+    vlm_model: str = typer.Option("microsoft/Florence-2-base-ft", help="Model VLM cho Q&A (HuggingFace id Florence-2; để trống để tắt)"),
+    vlm_device: str | None = typer.Option(None, help="Device VLM (mặc định auto / cpu)"),
+    vlm_dtype: str = typer.Option("float32", help="Precision VLM: float32 (CPU an toàn) | float16 | bfloat16 (GPU)"),
+    vlm_timeout: int = typer.Option(120, help="Timeout (giây) mỗi lần gọi VLM"),
     coarse_top_k: int = typer.Option(200, help="TRAKE: giới hạn số video đưa vào DP alignment (coarse filter). 0 = xét hết."),
+    late_interaction_weight: float = typer.Option(0.0, help="KIS: bật late-interaction (ColBERT-style MaxSim theo từng facet query). 0 = tắt (mặc định). Thử 0.5 để CLIP không chọn nhầm frame đúng cảnh sai vật thể. Nặng hơn RRF nhưng chỉ vài chục encode text, vẫn ms."),
+    object_evidence_weight: float = typer.Option(0.03, help="KIS: độ lớn reward/penalty object detector khi query hỏi vật thể (RRF scale). Lớn hơn = ép object mạnh hơn CLIP."),
+    object_penalty_scale: float = typer.Option(2.0, help="KIS: hệ số phạt frame THIẾU vật thể so với thưởng frame có vật thể (mặc định 2.0)."),
+    drop_empty_object_frames: bool = typer.Option(False, help="KIS: loại hẳn frame KHÔNG có vật thể nào (ảnh mờ, không entity đạt ngưỡng 0.4) khi query có hỏi vật thể. Giảm truy xuất đến frame nhiễu. Tắt nếu sợ mất recall."),
     trake_preferred_prefixes: str = typer.Option("", help="Ưu tiên (soft bias, KHÔNG loại trừ) TRAKE vào tiền tố video_id, cách nhau dấu phẩy (vd: L26). KIS/Q&A luôn xét TOÀN BỘ video. Để trống = mặc định ưu tiên L26. Truyền '.' để tắt ưu tiên."),
     translate: bool = typer.Option(False, help="Dịch VI→EN trước khi retrieval (CLIP là tiếng Anh). Mặc định tắt: dùng query nguyên bản."),
     output: Path | None = typer.Option(None),
@@ -530,6 +700,11 @@ def agent_query(
     # coarse_top_k áp dụng cho cả KIS (video-level rerank) và TRAKE (DP coarse
     # filter). TRAKE dùng agent.coarse_top_k; KIS dùng tools.coarse_top_k.
     tools.coarse_top_k = coarse_top_k
+    # KIS evidence tuning (object detector + late-interaction facet rerank).
+    tools.late_interaction_weight = late_interaction_weight
+    tools.object_evidence_weight = object_evidence_weight
+    tools.object_penalty_scale = object_penalty_scale
+    tools.drop_empty_object_frames = drop_empty_object_frames
     # Objects/OCR are frame-specific; do not duplicate video metadata in BM25.
     from aic2026.retrieval import BM25Index
     tools.bm25_index = BM25Index(manifest_records)
@@ -543,26 +718,14 @@ def agent_query(
         if raw == ".":
             return None
         return [p.strip() for p in raw.split(",") if p.strip()] or None
+    # Pass the VLM model id to tools; it is built lazily ONLY on the QA answer
+    # step (after the CLIP encoder is freed) so CLIP + Florence are never both
+    # resident (avoids OOM). For KIS/TRAKE we pass None so the VLM is never
+    # built/loaded (saves the ~52s + ~600MB Florence load).
     if parsed_query.type == "qa" and vlm_backend != "none" and vlm_model:
-        if vlm_backend == "ollama":
-            from aic2026.qa.vlm_ollama import OllamaVisionModel
-            tools.visual_answerer = OllamaVisionModel(
-                model_name=vlm_model,
-                base_url=ollama_url,
-                timeout_seconds=vlm_timeout,
-            ).answer_question
-        elif vlm_backend == "transformers":
-            from aic2026.qa.vlm import QwenVLM
-            tools.visual_answerer = QwenVLM(
-                model_name=vlm_model,
-                device=vlm_device,
-                torch_dtype=vlm_dtype,
-            ).answer_question
-        else:
-            raise typer.BadParameter(
-                f"Unknown --vlm-backend '{vlm_backend}'. "
-                "Expected one of: ollama, transformers, none."
-            )
+        tools.vlm_model = vlm_model
+        tools.vlm_device = vlm_device
+        tools.vlm_dtype = vlm_dtype
     agent = RetrievalAgent(
         tools,
         llm=OllamaLLM(model=llm_model, base_url=ollama_url, timeout_seconds=llm_timeout),
@@ -585,6 +748,57 @@ def agent_query(
         typer.echo(f"Wrote agent result to {output}")
     else:
         typer.echo(serialized)
+
+@app.command("export-submission")
+def export_submission(
+    result: Path = typer.Option(..., help="Agent JSON output của `agent-query` (--output ...)"),
+    query: Path = typer.Option(..., help="File Query JSON gốc (cùng query_id/type/events)"),
+    output: Path | None = typer.Option(None, help="CSV đầu ra. Mặc định <result_stem>.csv cạnh file result."),
+) -> None:
+    """Chuyển kết quả JSON của `agent-query` thành 1 dòng CSV nộp bài BTC.
+
+    Đây là bước bạn đang thiếu: `agent-query` chỉ xuất JSON (có event_frames ở
+    trong), còn BTC yêu cầu file CSV theo đúng định dạng mỗi task:
+      - KIS : ``<video_id>,<frame_id>``
+      - Q&A : ``<video_id>,<frame_id>,<answer>``
+      - TRAKE: ``<video_id>,<frame_1>,<frame_2>,...,<frame_N>``  (N = số event)
+
+    Với TRAKE, dòng này CHỨA ĐỦ các frame event (khác với KIS chỉ 1 frame),
+    nên kết quả sẽ KHÔNG còn 'giống KIS'. Dùng sau mỗi `agent-query`:
+
+        aic2026 export-submission --result outputs/result_trake.json \\
+            --query query_trake.json --output outputs/result_trake.csv
+    """
+    from aic2026.agent.types import AgentResult
+    from aic2026.submission import csv_row
+
+    parsed_query = Query.model_validate_json(query.read_text(encoding="utf-8"))
+    agent_result = AgentResult.model_validate_json(
+        result.read_text(encoding="utf-8")
+    )
+
+    if not agent_result.candidates:
+        raise typer.BadParameter(
+            f"Result rỗng — query '{parsed_query.query_id}' không có candidate nào."
+        )
+
+    ranked = sorted(
+        agent_result.candidates,
+        key=lambda c: c.score,
+        reverse=True,
+    )
+
+    out_path = output or result.with_suffix(".csv")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        csv_row(parsed_query, ranked[0]) + "\n",
+        encoding="utf-8",
+    )
+    typer.echo(
+        f"Wrote BTC submission CSV ({parsed_query.type}) -> {out_path}\n"
+        f"  {out_path.read_text(encoding='utf-8').strip()}"
+    )
+
 
 @app.command()
 def evaluate(query: Path, candidates: Path, ground_truth: Path) -> None:

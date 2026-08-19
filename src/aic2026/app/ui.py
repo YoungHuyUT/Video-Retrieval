@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import urllib.parse
 from pathlib import Path
 
 import httpx
@@ -175,6 +176,73 @@ def run_backend(task_type: str, query: Query, runtime: dict, backend_url: str):
         raise BackendRequestError("Backend không trả về dữ liệu hợp lệ.") from exc
 
 
+def run_backend_qa_phase1(query: Query, runtime: dict, backend_url: str):
+    """Phase-1 QA: chỉ retrieval, không VLM. Trả candidates ngay để hiển gallery."""
+    from aic2026.agent.types import AgentResult
+
+    try:
+        response = httpx.post(
+            f"{backend_url.rstrip('/')}/tasks/qa/candidates",
+            json={
+                "query_id": query.query_id,
+                "text": query.text,
+                "question": query.question,
+                "events": query.events,
+                "runtime": runtime,
+            },
+            timeout=120,  # retrieval thường xong trong 5-20s
+        )
+        response.raise_for_status()
+        return AgentResult.model_validate(response.json())
+    except httpx.TimeoutException as exc:
+        raise BackendRequestError("Retrieval quá thời gian (120s).") from exc
+    except httpx.HTTPStatusError as exc:
+        try:
+            detail = exc.response.json()
+        except json.JSONDecodeError:
+            detail = exc.response.text
+        raise BackendRequestError(f"Backend trả HTTP {exc.response.status_code}: {detail}") from exc
+    except httpx.RequestError as exc:
+        raise BackendRequestError("Không thể kết nối tới backend.") from exc
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise BackendRequestError("Backend không trả về dữ liệu hợp lệ.") from exc
+
+
+def run_backend_qa_answers(
+    question: str,
+    candidates: list[Candidate],
+    runtime: dict,
+    backend_url: str,
+) -> dict[int, str]:
+    """Phase-2 QA: gửi candidates lên backend, nhận {vector_id: answer} từ VLM song song."""
+    try:
+        response = httpx.post(
+            f"{backend_url.rstrip('/')}/tasks/qa/answers",
+            json={
+                "question": question,
+                "candidates": [c.model_dump() for c in candidates],
+                "runtime": runtime,
+            },
+            timeout=600,  # VLM có thể mất 2-5 phút với nhiều video
+        )
+        response.raise_for_status()
+        # API trả {str(vector_id): answer} → chuyển thành {int: answer}
+        raw = response.json()
+        return {int(k): v for k, v in raw.items()}
+    except httpx.TimeoutException as exc:
+        raise BackendRequestError("VLM quá thời gian (600s).") from exc
+    except httpx.HTTPStatusError as exc:
+        try:
+            detail = exc.response.json()
+        except json.JSONDecodeError:
+            detail = exc.response.text
+        raise BackendRequestError(f"Backend trả HTTP {exc.response.status_code}: {detail}") from exc
+    except httpx.RequestError as exc:
+        raise BackendRequestError("Không thể kết nối tới backend.") from exc
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise BackendRequestError("Backend không trả về dữ liệu hợp lệ.") from exc
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -275,14 +343,17 @@ def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
         with grid[pos % 5]:
             is_sel = idx in selected
             if path and path.exists():
+                st.markdown(f'<div class="gallery-card-container" data-video-id="{html.escape(item.video_id)}">', unsafe_allow_html=True)
                 st.markdown('<div class="hero-wrap">', unsafe_allow_html=True)
-                st.image(str(path), use_container_width=True)
+                img_url = f"http://127.0.0.1:8000/images?path={urllib.parse.quote(str(path))}"
+                st.image(img_url, use_container_width=True)
                 st.markdown("</div>", unsafe_allow_html=True)
             else:
+                st.markdown(f'<div class="gallery-card-container" data-video-id="{html.escape(item.video_id)}">', unsafe_allow_html=True)
                 st.caption("Không có ảnh")
             answer_html = ""
             if query.type == "qa":
-                ans = item.answer or "—"
+                ans = item.answer or "⏳ đang phân tích..."
                 answer_html = f'<div class="card-answer">Đáp: {html.escape(str(ans))}</div>'
             st.markdown(
                 f'<div class="card-meta">'
@@ -293,6 +364,7 @@ def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
                 unsafe_allow_html=True,
             )
             st.checkbox("Chọn", key=f"sel_{idx}", on_change=_toggle, args=(idx,), label_visibility="collapsed")
+            st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _render_trake_gallery(query: Query, visible: list[tuple[int, Candidate]], root: Path, selected: set[int]) -> None:
@@ -378,8 +450,22 @@ if query_type == "qa":
     question = st.text_input("Câu hỏi Q&A", placeholder="Ví dụ: Có bao nhiêu người?", label_visibility="collapsed",
                              key="query_question")
 if query_type == "trake":
-    events_text = st.text_input("Event (phân cách ;)", placeholder="Chạy đà;Giậm nhảy;Tiếp đất", label_visibility="collapsed",
-                                key="query_events")
+    events_text = st.text_area(
+        "Event TRAKE (mỗi event 1 dòng, theo thứ tự thời gian trong video)",
+        placeholder=(
+            "A person enters the room\n"
+            "The person sits down\n"
+            "The person starts speaking"
+        ),
+        height=140,
+        label_visibility="collapsed",
+        key="query_events",
+        help=(
+            "TRAKE tìm một CHUỖI sự kiện theo thứ tự thời gian (khác KIS chỉ 1 khung). "
+            "Nhập mỗi event trên 1 dòng, từ sớm → muộn. Số dòng = số frame xuất ra CSV. "
+            "Viết tiếng Anh, ngắn gọn: 'a person opens the fridge'."
+        ),
+    )
 
 # --- Ô Query + nút Chạy trong CÙNG một form (Enter = submit) ---
 with rest_col:
@@ -417,7 +503,7 @@ if st.session_state.get("_run_agent"):
     else:
         try:
             query = build_query(query_type, text, question, events_text)
-            if query_type == "TRAKE" and not query.events:
+            if query_type == "trake" and not query.events:
                 st.error("TRAKE cần ít nhất một event.")
             else:
                 runtime = {
@@ -429,21 +515,50 @@ if st.session_state.get("_run_agent"):
                     "metadata_filter": st.session_state.get("cfg_filter", ""),
                     "translate_query": bool(st.session_state.get("cfg_translate", False)),
                     "coarse_top_k": int(st.session_state.get("cfg_coarse_top_k", 200)),
+                    "vlm_backend": st.session_state.get("cfg_vlm_backend", "florence"),
+                    "vlm_model": st.session_state.get("cfg_vlm_model", "microsoft/Florence-2-base-ft"),
+                    "vlm_top_videos": int(st.session_state.get("cfg_vlm_top_videos", 20)),
+                    "vlm_max_workers": int(st.session_state.get("cfg_vlm_max_workers", 8)),
+                    "vlm_timeout": int(st.session_state.get("cfg_vlm_timeout", 120)),
                 }
                 backend_url = st.session_state.get("cfg_backend", "http://127.0.0.1:8000")
-                with st.spinner("Agent đang retrieval..."):
-                    result = run_backend(query_type, query, runtime, backend_url)
-                st.session_state.update(
-                    query=query,
-                    candidates=result.candidates,
-                    trace=result.trace,
-                    raw_root=st.session_state.get("cfg_root", "data/processed"),
-                    manifest_path=runtime["manifest_path"],
-                    selected=set(),  # reset tick khi chạy query mới
-                )
-                # Lưu bản dịch (từ trace bước "translate") để hiển thị cho người dùng.
-                # Cấu trúc detail: {"normalized": true, "changes": {"text": {"from":.., "to":..}}}
-                # → "to" nằm SÂU trong changes["text"]["to"], KHÔNG phải _td.get("to") gốc.
+
+                if query_type == "qa":
+                    # ---- Phase 1: retrieval nhanh (giống KIS), hiển gallery ảnh ngay ----
+                    with st.spinner("🔍 Đang tìm kiếm... (sẽ thấy ảnh ngay)"):
+                        result = run_backend_qa_phase1(query, runtime, backend_url)
+                    st.session_state.update(
+                        query=query,
+                        candidates=result.candidates,
+                        trace=result.trace,
+                        raw_root=st.session_state.get("cfg_root", "data/processed"),
+                        manifest_path=runtime["manifest_path"],
+                        selected=set(),
+                        qa_answers_ready=False,   # phase 2 chưa chạy
+                        qa_question=question,
+                        qa_runtime=runtime,
+                        qa_backend_url=backend_url,
+                    )
+                    for k in [key for key in st.session_state.keys() if key.startswith("sel_")]:
+                        del st.session_state[k]
+                    st.rerun()
+                else:
+                    # KIS / TRAKE: giữ nguyên luồng cũ
+                    with st.spinner("Agent đang retrieval..."):
+                        result = run_backend(query_type, query, runtime, backend_url)
+                    st.session_state.update(
+                        query=query,
+                        candidates=result.candidates,
+                        trace=result.trace,
+                        raw_root=st.session_state.get("cfg_root", "data/processed"),
+                        manifest_path=runtime["manifest_path"],
+                        selected=set(),
+                    )
+                    # Xóa trạng thái widget checkbox cũ (sel_*)
+                    for k in [key for key in st.session_state.keys() if key.startswith("sel_")]:
+                        del st.session_state[k]
+
+                # Bản dịch (giữ nguyên cho mọi luồng)
                 translated = None
                 translation_source = None
                 for step in result.trace:
@@ -458,7 +573,6 @@ if st.session_state.get("_run_agent"):
                             translated = None
                         break
                 st.session_state["translated_query"] = translated
-                # Thông báo rõ ràng cho người dùng biết query đã được dịch
                 if translation_source == "offline_fallback":
                     st.toast(
                         f"⚠️ LLM dịch lỗi — đang dùng bản dịch offline: {translated or text}",
@@ -469,12 +583,9 @@ if st.session_state.get("_run_agent"):
                 elif text.strip() and _is_english(text):
                     st.toast("ℹ️ Query đã là tiếng Anh — không cần dịch", icon="🌐")
                 elif not bool(st.session_state.get("cfg_translate", False)):
-                    # Không bật nút "Dịch VI→EN" → backend dùng query nguyên bản.
                     st.toast("ℹ️ Chưa bật 'Dịch VI→EN' — dùng query nguyên bản", icon="🌐")
                 else:
                     st.toast("⚠️ Không dịch được (LLM lỗi?) — dùng nguyên bản tiếng Việt", icon="🌐")
-                # Xóa trạng thái widget checkbox cũ (sel_*) để không lệch với query mới
-                for k in [key for key in st.session_state.keys() if key.startswith("sel_")]:
                     del st.session_state[k]
         except (BackendRequestError, ValidationError) as error:
             st.error(f"Không chạy được agent: {error}")
@@ -511,6 +622,13 @@ with st.expander("Cấu hình nâng cao"):
             "lớn = đầy đủ nhưng chậm/OOM. 0 = xét hết mọi video."
         ),
     )
+    # Cấu hình VLM phục vụ Phase-2 QA
+    st.selectbox("QA VLM Backend", ["florence", "none"], index=0, key="cfg_vlm_backend",
+                 help="Florence-2 thay thế QwenVLM/Ollama (chạy CPU, không cần GPU/Ollama server).")
+    st.text_input("QA VLM Model", "microsoft/Florence-2-base-ft", key="cfg_vlm_model")
+    st.number_input("QA VLM: Số video giới hạn gửi (vlm_top_videos)", min_value=1, max_value=200, value=20, key="cfg_vlm_top_videos")
+    st.number_input("QA VLM: Số thread song song (vlm_max_workers)", min_value=1, max_value=32, value=8, key="cfg_vlm_max_workers")
+    st.number_input("QA VLM: Timeout mỗi video (giây)", min_value=10, max_value=600, value=120, key="cfg_vlm_timeout")
 
 st.markdown("</div>", unsafe_allow_html=True)  # đóng .topbar
 
@@ -567,8 +685,54 @@ else:
         # Thanh công cụ: lọc video + giới hạn + chọn tất cả
         col_filter, col_limit, col_all = st.columns([2, 1, 1])
         with col_filter:
-            video_options = ["Tất cả"] + sorted({c.video_id for c in candidates})
-            selected_video = st.selectbox("Lọc theo video", video_options, index=0)
+            if query.type == "TRAKE":
+                video_options = ["Tất cả"] + sorted({c.video_id for c in candidates})
+                selected_video = st.selectbox("Lọc theo video", video_options, index=0)
+            else:
+                selected_video = "Tất cả"
+                video_options = sorted({c.video_id for c in candidates})
+                opts = "".join([f'<option value="{html.escape(vid)}">{html.escape(vid)}</option>' for vid in video_options])
+                filter_html = f"""
+                <div style="margin-bottom: 0px;">
+                    <label for="client-video-filter" style="font-weight: bold; color: var(--peg-ink); font-size: 0.85rem; display: block; margin-bottom: 4px;">Lọc theo video (Tức thì)</label>
+                    <select id="client-video-filter" onchange="window.filterKeyframes(this.value)" style="
+                        width: 100%;
+                        padding: 6px 10px;
+                        border-radius: 0.5rem;
+                        border: 1.5px solid #c9b6e8;
+                        background: rgba(255,255,255,0.85);
+                        color: var(--peg-ink);
+                        font-size: 0.85rem;
+                        height: 38px;
+                    ">
+                        <option value="Tất cả">Tất cả</option>
+                        {opts}
+                    </select>
+                </div>
+                
+                <script>
+                window.filterKeyframes = function(selectedVideo) {{
+                    const containers = document.querySelectorAll('.gallery-card-container');
+                    containers.forEach(container => {{
+                        const column = container.closest('[data-testid="column"]');
+                        if (!column) return;
+                        if (selectedVideo === 'Tất cả' || container.getAttribute('data-video-id') === selectedVideo) {{
+                            column.style.display = 'block';
+                        }} else {{
+                            column.style.display = 'none';
+                        }}
+                    }});
+                }};
+                // Gọi lại bộ lọc khi Streamlit rerun để đồng bộ trạng thái hiển thị
+                setTimeout(() => {{
+                    const dropdown = document.getElementById('client-video-filter');
+                    if (dropdown) {{
+                        window.filterKeyframes(dropdown.value);
+                    }}
+                }}, 100);
+                </script>
+                """
+                st.markdown(filter_html, unsafe_allow_html=True)
         with col_limit:
             if total <= 1:
                 max_show = total
@@ -600,6 +764,28 @@ else:
             _render_trake_gallery(query, visible, root, selected)
         else:
             _render_frame_gallery(query, visible, root, selected)
+
+        # ---- Phase 2: Chạy VLM song song cho QA ----
+        if query.type == "qa" and not st.session_state.get("qa_answers_ready", False):
+            vlm_q = st.session_state.get("qa_question")
+            vlm_rt = st.session_state.get("qa_runtime")
+            vlm_url = st.session_state.get("qa_backend_url")
+            if vlm_q and vlm_rt and vlm_url:
+                with st.spinner("🤖 VLM đang phân tích các video song song để tìm đáp án..."):
+                    try:
+                        answers = run_backend_qa_answers(
+                            question=vlm_q,
+                            candidates=candidates,
+                            runtime=vlm_rt,
+                            backend_url=vlm_url,
+                        )
+                        for c in candidates:
+                            if c.vector_id is not None and c.vector_id in answers:
+                                c.answer = answers[c.vector_id]
+                        st.session_state["qa_answers_ready"] = True
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Lỗi khi chạy VLM song song: {e}")
 
         # ---- Thanh xuất CSV chuẩn nộp bài BTC ----
         st.divider()

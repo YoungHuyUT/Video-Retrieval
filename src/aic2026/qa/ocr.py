@@ -75,11 +75,24 @@ class OCRTextExtractor:
     returns ``[]`` instead of crashing, so retrieval degrades gracefully.
     Used to enrich the BM25 index with on-screen text (titles, logos, banners)
     that CLIP cannot read.
+
+    ``correct`` (default True) runs a lightweight Vietnamese post-correction
+    pass (see :mod:`aic2026.qa.vi_correct`) to fix systematic OCR errors
+    (garbled diacritics, confusable letter pairs, noise tokens) without
+    swapping the model — a public VN fine-tune was tested on real keyframes
+    and scored *worse* (it overfits document-scan fonts).
     """
 
-    def __init__(self, lang: str = "vi", model_size: str = "medium", **paddle_kwargs: object) -> None:
+    def __init__(
+        self,
+        lang: str = "vi",
+        model_size: str = "medium",
+        correct: bool = True,
+        **paddle_kwargs: object,
+    ) -> None:
         self.lang = lang
         self.model_size = model_size
+        self.correct = correct
         # Keyframes are ordinary video frames, not scanned documents. PaddleOCR
         # v3 enables three document-preprocessing models by default; they add
         # several downloads and substantial RAM use but do not help normal
@@ -91,14 +104,24 @@ class OCRTextExtractor:
             **paddle_kwargs,
         }
         # PP-OCRv6 ships both a `medium` (default, accurate) and a `mobile`
-        # (3–5x faster, slightly less accurate) recognizer/detector. Pass the
-        # mobile checkpoint names only when explicitly requested so the default
-        # path is unchanged and never breaks.
+        # (3–5x faster, slightly less accurate) recognizer/detector. The
+        # PaddleOCR 3.x constructor only accepts `det_model_dir` /
+        # `rec_model_dir` (the bare `*_model_name` keys raise
+        # "Unknown argument"), so pass the checkpoint names through the
+        # `*_model_dir` slots — Paddle resolves them from its model zoo. Only
+        # set when explicitly requested so the default path is unchanged.
         if model_size == "mobile":
-            self._paddle_kwargs["det_model_name"] = "PP-OCRv6_mobile_det"
-            self._paddle_kwargs["rec_model_name"] = "PP-OCRv6_mobile_rec"
+            self._paddle_kwargs["det_model_dir"] = "PP-OCRv6_mobile_det"
+            self._paddle_kwargs["rec_model_dir"] = "PP-OCRv6_mobile_rec"
         self._ocr = None
         self._load_failed: bool = False
+
+    def _post_correct(self, texts: list[str]) -> list[str]:
+        if not self.correct:
+            return texts
+        from aic2026.qa.vi_correct import correct_texts
+
+        return correct_texts(texts)
 
     def _ensure_loaded(self) -> None:
         if self._ocr is not None or self._load_failed:
@@ -146,7 +169,7 @@ class OCRTextExtractor:
                 else:
                     result = self._ocr.ocr(str(frame_path), cls=True)
             if hasattr(self._ocr, "predict"):
-                return self._extract_v3(result)
+                return self._post_correct(self._extract_v3(result))
         except Exception as exc:  # noqa: BLE001 — a bad frame must not abort a batch
             logger.debug("OCRTextExtractor: error on %s: %s", frame_path, exc)
             return []
@@ -165,7 +188,7 @@ class OCRTextExtractor:
                     continue
                 if text and text.strip():
                     texts.append(text.strip())
-        return texts
+        return self._post_correct(texts)
 
     @staticmethod
     def _extract_v3(results: object) -> list[str]:
@@ -235,7 +258,9 @@ class OCRTextExtractor:
                         raise RuntimeError(
                             f"PaddleOCR returned {len(pages)} results for {len(chunk)} inputs"
                         )
-                    outputs.extend(self._extract_v3([page]) for page in pages)
+                    outputs.extend(
+                        self._post_correct(self._extract_v3([page])) for page in pages
+                    )
                     continue
                 except Exception as exc:  # noqa: BLE001 - compatibility fallback
                     logger.warning(

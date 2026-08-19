@@ -47,6 +47,9 @@ def _load_keyframe_frame_ids(map_root: Path | None, video_id: str) -> list[int] 
 # Object JSON chứa đến 100 boxes/frame với score rất thấp (0.006...); giữ
 # entity có score thấp sẽ làm BM25 nhiễu. 0.3 là mốc giữ được entity rõ rệt.
 _OBJECT_SCORE_THRESHOLD = 0.3
+# Ngưỡng "có vật thể rõ": nếu KHÔNG có entity nào đạt ngưỡng này, coi frame ảnh
+# mờ / không có vật thể đáng tin → trả [] (rỗng) thay vì giữ entity yếu.
+_OBJECT_PRESENT_THRESHOLD = 0.4
 
 
 def _load_object_labels(object_path: Path | None) -> list[str]:
@@ -83,10 +86,15 @@ def _load_object_labels(object_path: Path | None) -> list[str]:
             scores.append(1.0)
     # Dò đủ độ dài: nếu scores ngắn hơn entities, pad = keep lại.
     keep: list[str] = []
+    has_strong = False
     for i, ent in enumerate(entities):
         sc = scores[i] if i < len(scores) else 1.0
         if sc >= _OBJECT_SCORE_THRESHOLD:
             keep.append(str(ent))
+        if sc >= _OBJECT_PRESENT_THRESHOLD:
+            has_strong = True
+    if not has_strong:
+        return []
     return sorted(set(keep))
 
 
@@ -307,77 +315,82 @@ def build_official_index(
                 frame_indices=frame_indices,
             )
 
-    rows: list[tuple[int, str, int, str, list[str], str | None, int]] = []
-    vector_id = 0
-    video_bar = tqdm(feature_paths, desc="Build manifest", unit="video", smoothing=0.05)
-    for fpath in video_bar:
-        video_id = fpath.stem  # e.g. "L21_V001"
-        arr = arrays[feature_paths.index(fpath)]  # reuse already-loaded matrix
-        n_frames = arr.shape[0]
-        # Ưu tiên CSV map-keyframes (frame_idx chuẩn), fallback metadata.json.
-        csv_frames = _load_keyframe_frame_ids(map_root, video_id)
-        expected = csv_frames  # VideoMetadata already has frame_indices from metadata
-        vmeta = video_meta_cache[video_id]
-        # object_files: pre-indexed tên file (stem) để lookup nhanh.
-        obj_files = object_files_by_video.get(video_id)
-        video_bar.set_postfix(frames=vector_id)
-        for ordinal_index in range(n_frames):
-            ordinal = ordinal_index + 1  # 1-based keyframe ordinal
-            # Use cached frame_indices (from metadata) first, then CSV map, then ordinal
-            if vmeta.frame_indices and ordinal_index < len(vmeta.frame_indices):
-                frame_id = vmeta.frame_indices[ordinal_index]
-            elif expected and ordinal_index < len(expected):
-                frame_id = expected[ordinal_index]
-            else:
-                frame_id = ordinal
-            image = image_by_slot.get((video_id, ordinal))
-            keyframe_path = str(image) if image is not None else ""
-            object_path = None
-            labels: list[str] = []
-            if obj_files:
+    # GHI TĂNG DẦN (streaming) vào manifest: mỗi video xử lý xong là ghi ngay
+    # từng dòng JSONL và flush. Mục đích: nếu chạy 2 tiếng mà bị ngắt (lỗi điện,
+    # Ctrl+C, crash) thì file vẫn chứa dữ liệu hợp lệ của những video ĐÃ đọc —
+    # không mất trắng, và user có thể mở file để theo dõi tiến độ bất cứ lúc nào
+    # ("ghi dô file trước đã không break mất").
+    total_videos = len(feature_paths)
+    written_records = 0
+    empty_object_videos = 0  # số video mà TẤT CẢ frame đều rỗng object (ảnh mờ)
+    by_video_count: dict[str, int] = {}
+    output_manifest.parent.mkdir(parents=True, exist_ok=True)
+    with output_manifest.open("w", encoding="utf-8") as mf:
+        video_bar = tqdm(feature_paths, desc="Build manifest", unit="video", smoothing=0.05)
+        for vi, fpath in enumerate(video_bar):
+            video_id = fpath.stem  # e.g. "L21_V001"
+            arr = arrays[feature_paths.index(fpath)]  # reuse already-loaded matrix
+            n_frames = arr.shape[0]
+            # Ưu tiên CSV map-keyframes (frame_idx chuẩn), fallback metadata.json.
+            csv_frames = _load_keyframe_frame_ids(map_root, video_id)
+            expected = csv_frames  # VideoMetadata already has frame_indices from metadata
+            vmeta = video_meta_cache[video_id]
+            # object_files: pre-indexed tên file (stem) để lookup nhanh.
+            obj_files = object_files_by_video.get(video_id)
+            video_empty = 0  # frame rỗng object trong video này
+            for ordinal_index in range(n_frames):
+                ordinal = ordinal_index + 1  # 1-based keyframe ordinal
+                # Use cached frame_indices (from metadata) first, then CSV map, then ordinal
+                if vmeta.frame_indices and ordinal_index < len(vmeta.frame_indices):
+                    frame_id = vmeta.frame_indices[ordinal_index]
+                elif expected and ordinal_index < len(expected):
+                    frame_id = expected[ordinal_index]
+                else:
+                    frame_id = ordinal
+                image = image_by_slot.get((video_id, ordinal))
+                keyframe_path = str(image) if image is not None else ""
                 single = f"{ordinal:03d}"
-                if single in obj_files:
+                object_path = None
+                labels: list[str] = []
+                if obj_files and single in obj_files:
                     object_path = objects_root / video_id / f"{single}.json"
                     labels = _load_object_labels(object_path)
-            else:
-                # Fallback: thử đường dẫn .json trực tiếp (tùa filename).
-                object_path = objects_root / video_id / f"{single}.json" if objects_root else None  # noqa: F841
-            rows.append(
-                (
-                    vector_id,
-                    video_id,
-                    frame_id,
-                    keyframe_path,
-                    labels,
-                    str(object_path) if object_path and object_path.exists() else None,
-                    vector_id,
+                elif objects_root is not None:
+                    # Fallback: thử đường dẫn .json trực tiếp (filename khớp ordinal).
+                    # Sửa bug UnboundLocalError 'single': tính single trước if/else.
+                    candidate = objects_root / video_id / f"{single}.json"
+                    if candidate.exists():
+                        object_path = candidate
+                        labels = _load_object_labels(object_path)
+                if not labels:
+                    video_empty += 1
+                # Ghi NGAY frame này ra file (streaming) thay vì gom RAM rồi ghi cuối.
+                rec = FrameRecord(
+                    vector_id=written_records,
+                    clip_feature_index=written_records,
+                    video_id=video_id,
+                    frame_id=frame_id,
+                    keyframe_path=keyframe_path,
+                    # object_labels only — video-level text moved to video_metadata.jsonl
+                    # (see _emit_video_metadata below) to avoid per-frame duplication.
+                    object_labels=[label for label in labels if label],
+                    object_path=object_path,
+                    metadata_path=vmeta.metadata_path,
                 )
-            )
-            vector_id += 1
+                mf.write(rec.model_dump_json() + "\n")
+                written_records += 1
+            by_video_count[video_id] = n_frames
+            if video_empty == n_frames:
+                empty_object_videos += 1
+            mf.flush()  # đẩy xuống đĩa ngay — an toàn nếu bị ngắt
+            video_bar.set_postfix(frames=written_records)
+            # Log tiến độ LIÊN TỤC (ra file + console) mỗi 25 video.
+            if (vi + 1) % 25 == 0 or (vi + 1) == total_videos:
+                logger.info(
+                    "Tiến độ: %d/%d video | %d frame đã ghi | video ảnh-mờ (rỗng object): %d",
+                    vi + 1, total_videos, written_records, empty_object_videos,
+                )
 
-    records: list[FrameRecord] = [
-        FrameRecord(
-            vector_id=vid,
-            clip_feature_index=clip_idx,
-            video_id=video_id,
-            frame_id=frame_id,
-            keyframe_path=keyframe_path,
-            # object_labels only — video-level text moved to video_metadata.jsonl
-            # (see _emit_video_metadata below) to avoid per-frame duplication.
-            object_labels=[label for label in labels if label],
-            object_path=object_path,
-            metadata_path=vmeta.metadata_path,
-        )
-        for vid, video_id, frame_id, keyframe_path, labels, object_path, clip_idx in rows
-    ]
-
-    # Cross-check per-video frame counts against metadata when available. A
-    # mismatch usually means the metadata file does not describe these keyframes
-    # (e.g. a stale frame_indices list), so we surface it instead of silently
-    # writing frame_ids that point at the wrong video frames.
-    by_video_count: dict[str, int] = {}
-    for record in records:
-        by_video_count[record.video_id] = by_video_count.get(record.video_id, 0) + 1
     for video_id in sorted(by_video_count):
         expected = _expected_frame_indices(metadata_root, video_id)
         if expected and len(expected) != by_video_count[video_id]:
@@ -392,19 +405,18 @@ def build_official_index(
     # The official .npy is documented as one row per keyframe in ascending
     # keyframe order. Both the manifest rows and the .npy rows are produced in
     # that natural (sorted video, ascending ordinal) order, so row i of the
-    # matrix corresponds to manifest record i. We keep the rows untouched and
-    # verify the count matches — reordering blindly without knowing the actual
-    # .npy video order would risk silently misaligning every frame.
-    if len(records) != int(vectors.shape[0]):
+    # matrix corresponds to manifest record i. The streaming loop above already
+    # wrote every record to disk incrementally; here we only verify the count
+    # matches — reordering blindly without knowing the actual .npy video order
+    # would risk silently misaligning every frame.
+    if written_records != int(vectors.shape[0]):
         raise ValueError(
-            f"Manifest records ({len(records)}) do not match feature rows "
+            f"Manifest records ({written_records}) do not match feature rows "
             f"({int(vectors.shape[0])})."
         )
     aligned = np.asarray(vectors, dtype=np.float32).copy()
 
-    output_manifest.parent.mkdir(parents=True, exist_ok=True)
     output_features.parent.mkdir(parents=True, exist_ok=True)
-    output_manifest.write_text("\n".join(record.model_dump_json() for record in records) + "\n", encoding="utf-8")
     np.save(output_features, aligned)
 
     # Emit per-video metadata JSONL once per video (NOT per frame). Video-level
@@ -439,7 +451,7 @@ def build_official_index(
     vm_store.save(vm_path)
     logger.info("Wrote %d video-metadata records to %s", len(vm_records), vm_path)
 
-    return len(records)
+    return written_records
 
 
 def build_from_clip(

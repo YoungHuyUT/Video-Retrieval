@@ -521,6 +521,13 @@ class RetrievalPipeline:
         video_ids: set[str] | None = None,
         coarse_top_k: int = 200,
         object_adjustment: Callable[[int, int], float] | None = None,
+        # Precomputed object-evidence adjustment matrices from
+        # ``build_object_adjustment_matrices`` (shape (event_count, F) per video,
+        # aligned with this video's manifest order). Passing these avoids the
+        # 40k+ per-(event,frame) Python closure calls that previously made TRAKE
+        # take ~145s per query — the matrix is added once with NumPy. The legacy
+        # ``object_adjustment`` callable is still supported as a fallback.
+        object_adjustment_matrices: dict[str, np.ndarray] | None = None,
         # Soft *preference* (NOT a restriction) for certain video_id prefixes
         # (e.g. ["L26"]). Preferred videos get a small bounded score nudge so they
         # rank above equally-similar non-preferred videos, but a non-preferred
@@ -640,12 +647,27 @@ class RetrievalPipeline:
             frame_vectors = self.index.vectors[
                 manifest_indices
             ]
+            # On the memory-mapped load path the index matrix is NOT normalized
+            # in place (to save RAM). Normalize the sliced frame block here so
+            # the matrix product below is a true cosine similarity regardless of
+            # how the index was loaded. Cheap: only candidate-video frames.
+            frame_norms = np.maximum(
+                np.linalg.norm(frame_vectors, axis=1, keepdims=True),
+                1e-12,
+            )
+            frame_vectors = frame_vectors / frame_norms
 
             similarity_matrix = (
                 query_matrix
                 @ frame_vectors.T
             )
-            if object_adjustment is not None:
+            if object_adjustment_matrices is not None and video_id in object_adjustment_matrices:
+                # Vectorized path: add the precomputed (event_count, F) matrix in
+                # one NumPy op instead of calling a Python closure 40k+ times.
+                adjustment = object_adjustment_matrices[video_id]
+                if adjustment.shape == similarity_matrix.shape:
+                    similarity_matrix = similarity_matrix + adjustment
+            elif object_adjustment is not None:
                 for event_index in range(event_count):
                     similarity_matrix[event_index] += np.asarray(
                         [

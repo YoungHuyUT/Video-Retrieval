@@ -54,59 +54,260 @@ __all__ = [
 ]
 
 
-# Canonical object concepts used by the OpenImages detector.  The aliases make
-# the query vocabulary forgiving ("people" must match the detector's
-# "Human"), without asking the user to configure object terms by hand.
+# Canonical object concepts used by the OpenImages / Faster R-CNN detector.
+# The aliases make the query vocabulary forgiving: each concept lists BOTH its
+# English detector label(s) (so a detected "Bottle" matches) AND common
+# Vietnamese query words (so a query like "chai nước" lights up the concept).
+# Without the Vietnamese aliases, a VN query never populated `requested`, so
+# object evidence stayed off and CLIP alone decided the top frame.
 _OBJECT_ALIASES: dict[str, tuple[str, ...]] = {
-    "person": ("person", "people", "human", "man", "woman", "boy", "girl", "child"),
-    "turtle": ("turtle", "sea turtle", "tortoise"),
-    "fish": ("fish",),
-    "dog": ("dog", "puppy"),
-    "cat": ("cat", "kitten"),
-    "car": ("car", "automobile", "vehicle"),
-    "bicycle": ("bicycle", "bike"),
-    "motorcycle": ("motorcycle", "motorbike"),
-    "bird": ("bird",),
-    "horse": ("horse",),
-    "elephant": ("elephant",),
-    "cow": ("cow", "cattle"),
-    "bus": ("bus",),
-    "train": ("train",),
-    "boat": ("boat", "ship"),
+    "person": ("person", "people", "human", "man", "woman", "boy", "girl", "child", "người", "đàn ông", "phụ nữ", "em bé", "trẻ em", "người đàn ông", "người phụ nữ"),
+    "crowd": ("crowd", "đám đông", "nhóm người"),
+    "turtle": ("turtle", "sea turtle", "tortoise", "rùa"),
+    "fish": ("fish", "con cá", "cá"),
+    "dog": ("dog", "puppy", "con chó", "chó"),
+    "cat": ("cat", "kitten", "con mèo"),
+    "car": ("car", "automobile", "vehicle", "xe hơi", "ô tô", "xe ô tô", "xe hơi"),
+    "bicycle": ("bicycle", "bike", "xe đạp"),
+    "motorcycle": ("motorcycle", "motorbike", "xe máy"),
+    "bird": ("bird", "chim"),
+    "horse": ("horse", "ngựa"),
+    "elephant": ("elephant", "voi"),
+    "cow": ("cow", "cattle", "con bò"),
+    "bus": ("bus", "xe buýt"),
+    "train": ("train", "tàu hỏa", "tàu"),
+    "boat": ("boat", "ship", "tàu thuyền", "thuyền"),
+    # --- Thêm: các vật thể phổ biến thường xuất trong query VN ---
+    "bottle": ("bottle", "water bottle", "chai", "chai nước", "cốc nước", "lon"),
+    "cup": ("cup", "cái ly", "ly nước", "cốc", "tách"),
+    "backpack": ("backpack", "ba lô", "cặp"),
+    "handbag": ("handbag", "túi xách", "túi"),
+    "suitcase": ("suitcase", "vali"),
+    "umbrella": ("umbrella", "cái ô", "ô dù"),
+    "traffic light": ("traffic light", "traffic signal", "đèn tín hiệu", "đèn giao thông", "đèn đường"),
+    "stop sign": ("stop sign", "biển báo", "biển báo stop"),
+    "sign": ("sign", "biển", "biển hiệu", "bảng"),
+    "book": ("book", "sách", "quyển sách"),
+    "chair": ("chair", "cái ghế", "ghế"),
+    "couch": ("couch", "sofa", "ghế sofa"),
+    "bed": ("bed", "giường", "cái giường"),
+    "dining table": ("dining table", "table", "cái bàn", "bàn ăn", "bàn làm việc"),
+    "bench": ("bench", "ghế đá", "ghế dài"),
+    "hand": ("hand", "bàn tay"),
+    "clock": ("clock", "đồng hồ"),
+    "cell phone": ("cell phone", "mobile phone", "phone", "điện thoại", "điện thoại di động"),
+    "laptop": ("laptop", "máy tính xách tay", "máy tính"),
+    "tv": ("tv", "television", "tivi"),
+    "remote": ("remote", "điều khiển"),
+    "keyboard": ("keyboard", "bàn phím"),
+    "refrigerator": ("refrigerator", "fridge", "tủ lạnh"),
+    "microwave": ("microwave", "lò vi sóng"),
+    "oven": ("oven", "lò nướng"),
+    "sink": ("sink", "bồn rửa", "chậu rửa"),
+    "toilet": ("toilet", "bồn cầu"),
+    "potted plant": ("potted plant", "plant", "chậu cây", "cây cảnh", "cái cây"),
+    "sports ball": ("sports ball", "ball", "quả bóng", "bóng"),
+    "teddy bear": ("teddy bear", "búp bê", "thú nhồi bông"),
+    "toy": ("toy", "đồ chơi"),
+    "skateboard": ("skateboard", "ván trượt"),
+    "surfboard": ("surfboard", "ván lướt sóng"),
+    "tennis racket": ("tennis racket", "vợt"),
+    "wine glass": ("wine glass", "ly rượu"),
+    "fork": ("fork", "cái nĩa", "nĩa", "dĩa"),
+    "knife": ("knife", "con dao", "cái dao", "dao"),
+    "spoon": ("spoon", "cái thìa", "thìa", "muỗng"),
+    "bowl": ("bowl", "cái bát", "bát", "cái tô", "tô"),
+    "banana": ("banana", "chuối"),
+    "apple": ("apple", "quả táo", "táo"),
+    "orange": ("orange", "quả cam", "màu cam"),
+    "broccoli": ("broccoli", "súp lơ"),
+    "carrot": ("carrot", "cà rốt"),
+    "pizza": ("pizza", "bánh pizza"),
+    "cake": ("cake", "cái bánh", "bánh"),
+    "sandwich": ("sandwich", "bánh mì"),
+    "vegetable": ("vegetable", "rau", "rau củ", "đồ ăn", "thức ăn"),
+    "stage": ("stage", "sân khấu"),
+    "scissors": ("scissors", "cái kéo", "kéo"),
 }
 
 
 def _has_phrase(text: str, phrase: str) -> bool:
-    return bool(re.search(r"(?<!\\w)" + re.escape(phrase) + r"(?!\\w)", text))
+    # Word-boundary match so "ca" does NOT match inside "cam" / "cá".  The
+    # original code used a raw string r"(?<!\w)" which is literally backslash-w
+    # (not the \w class), so the boundary was a no-op and every substring matched
+    # ("ca" matched "cam", "o" matched everywhere) — breaking object concept
+    # detection for Vietnamese queries.
+    return bool(re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", text))
+
+
+def _requested_concepts(query: str) -> set[str]:
+    """Concepts the query asks for, per ``_OBJECT_ALIASES`` (empty if none)."""
+    query_text = _fold_accents(query)
+    # Fold aliases too: the query is accent-folded, so a Vietnamese alias like
+    # "xe máy" must be folded to "xe may" before matching, otherwise it never
+    # fires and object evidence stays off for VN queries.
+    return {
+        concept
+        for concept, aliases in _OBJECT_ALIASES.items()
+        if any(_has_phrase(query_text, _fold_accents(alias)) for alias in aliases)
+    }
 
 
 def object_evidence_adjustment(
     query: str,
     record: FrameRecord,
     weight: float = 0.03,
+    penalty_scale: float = 2.0,
 ) -> float | None:
     """Return a signed object-evidence adjustment, or ``None`` if no object is asked.
 
     A full object match gets ``+weight`` and a frame missing every requested
-    object gets ``-weight``.  This is intentionally a soft penalty: Faster
-    R-CNN can miss small/occluded objects, so vector evidence is never discarded.
+    object gets ``-weight * penalty_scale``.  The penalty is amplified (default
+    ``penalty_scale = 2.0``) so that a frame the detector clearly shows lacking
+    the asked object is pushed down harder than a matching frame is lifted — this
+    directly counters the failure mode where CLIP ranks a frame high for the
+    right *scene* but the wrong *object* (e.g. a supermarket aisle with no water
+    bottle).  It remains a soft penalty: Faster R-CNN can miss small/occluded
+    objects, so vector evidence is never discarded outright.
     """
-    query_text = _fold_accents(query)
-    requested = {
-        concept
-        for concept, aliases in _OBJECT_ALIASES.items()
-        if any(_has_phrase(query_text, alias) for alias in aliases)
-    }
+    requested = _requested_concepts(query)
     if not requested:
         return None
 
     labels = _fold_accents(" ".join(record.object_labels or []))
     matched = sum(
-        any(_has_phrase(labels, alias) for alias in _OBJECT_ALIASES[concept])
+        any(_has_phrase(labels, _fold_accents(alias)) for alias in _OBJECT_ALIASES[concept])
         for concept in requested
     )
     coverage = matched / len(requested)
+    # Symmetrical-ish but asymmetric: full miss penalized harder than full match rewarded.
+    if coverage == 0.0:
+        return -weight * penalty_scale
     return weight * (2.0 * coverage - 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Vectorized object-evidence adjustment for TRAKE
+# ---------------------------------------------------------------------------
+# The legacy path applied object evidence via a per-(event, frame) Python
+# closure inside ``RetrievalPipeline.retrieve_trake``. That closure re-derived
+# the requested concepts (a 70-concept alias scan) and re-folded the frame's
+# object labels on EVERY one of the ~40k calls per query — measured at ~145s
+# for a single 3-event TRAKE query. The helpers below precompute the same
+# adjustment as a per-video NumPy matrix so the pipeline only needs a cheap
+# matrix addition per candidate video.
+
+_REQUESTED_CONCEPT_CACHE: dict[str, frozenset] = {}
+_FOLDED_LABEL_CACHE: dict[int, str] = {}
+
+
+def _requested_concepts_cached(query: str) -> frozenset:
+    """Cached ``_requested_concepts`` — the per-event scan is identical across
+    all frames of a video, so it must be computed ONCE, not 40k times."""
+
+    cached = _REQUESTED_CONCEPT_CACHE.get(query)
+    if cached is None:
+        cached = frozenset(_requested_concepts(query))
+        _REQUESTED_CONCEPT_CACHE[query] = cached
+    return cached
+
+
+def _folded_labels_for_record(record: FrameRecord) -> str:
+    """Cached accent-folded, space-joined object labels for one frame."""
+
+    key = record.vector_id
+    if key is not None and key in _FOLDED_LABEL_CACHE:
+        return _FOLDED_LABEL_CACHE[key]
+    folded = _fold_accents(" ".join(record.object_labels or []))
+    if key is not None:
+        _FOLDED_LABEL_CACHE[key] = folded
+    return folded
+
+
+def build_object_adjustment_matrices(
+    events: list[str],
+    candidate_videos: set[str],
+    video_to_manifest_indices: dict[str, np.ndarray],
+    manifest: list[FrameRecord],
+    weight: float = 0.08,
+    penalty_scale: float = 2.0,
+) -> dict[str, np.ndarray]:
+    """Build a vectorized object-evidence adjustment matrix per candidate video.
+
+    Returns ``{video_id: np.ndarray(shape=(len(events), F), dtype=float32)}``
+    where ``F`` is that video's frame count, aligned with the per-video manifest
+    order used by ``RetrievalPipeline.retrieve_trake``. Each cell equals the
+    signed adjustment ``object_evidence_adjustment`` would have produced for that
+    (event, frame) pair, so the pipeline can add it to ``similarity_matrix`` in
+    one NumPy op instead of calling Python 40k times.
+
+    Only the coarse-filtered ``candidate_videos`` are processed, and each
+    frame's labels are folded once and each concept's membership is computed
+    once — collapsing the dominant TRAKE cost from ~145s to a few seconds.
+    """
+
+    if not events or not candidate_videos:
+        return {}
+
+    event_requested = [_requested_concepts_cached(event) for event in events]
+
+    # Union of all requested concepts across events, with pre-folded aliases.
+    union: dict[str, list[str]] = {}
+    for requested in event_requested:
+        for concept in requested:
+            if concept not in union:
+                union[concept] = [
+                    _fold_accents(alias) for alias in _OBJECT_ALIASES[concept]
+                ]
+
+    matrices: dict[str, np.ndarray] = {}
+
+    for video_id in candidate_videos:
+        manifest_indices = video_to_manifest_indices.get(video_id)
+        if manifest_indices is None or len(manifest_indices) == 0:
+            continue
+
+        frame_count = int(len(manifest_indices))
+
+        # Fold each frame's labels once.
+        folded_labels = [
+            _folded_labels_for_record(manifest[int(index)])
+            for index in manifest_indices
+        ]
+
+        # Per-concept membership over the video's frames (frame_count booleans).
+        concept_present: dict[str, np.ndarray] = {}
+        for concept, aliases in union.items():
+            if not aliases:
+                continue
+            present = np.zeros(frame_count, dtype=np.float32)
+            for frame_position in range(frame_count):
+                text = folded_labels[frame_position]
+                if text and any(
+                    alias and _has_phrase(text, alias) for alias in aliases
+                ):
+                    present[frame_position] = 1.0
+            concept_present[concept] = present
+
+        coverage = np.zeros((len(events), frame_count), dtype=np.float32)
+        for event_index, requested in enumerate(event_requested):
+            if not requested:
+                continue
+            column = np.zeros(frame_count, dtype=np.float32)
+            for concept in requested:
+                column += concept_present.get(
+                    concept, np.zeros(frame_count, dtype=np.float32)
+                )
+            coverage[event_index] = column / len(requested)
+
+        adjustment = np.where(
+            coverage == 0.0,
+            -weight * penalty_scale,
+            weight * (2.0 * coverage - 1.0),
+        ).astype(np.float32)
+        matrices[video_id] = adjustment
+
+    return matrices
 
 
 def rerank_with_object_evidence(
@@ -114,15 +315,45 @@ def rerank_with_object_evidence(
     candidates: list[Candidate],
     records: dict[int, FrameRecord],
     weight: float = 0.03,
+    penalty_scale: float = 2.0,
+    drop_empty_object_frames: bool = False,
 ) -> list[Candidate]:
-    """Apply signed Object-detection evidence after vector/BM25 retrieval."""
-    reranked: list[Candidate] = []
+    """Apply signed Object-detection evidence after vector/BM25 retrieval.
+
+    When ``drop_empty_object_frames`` is True and the query actually asks for an
+    object (``object_evidence_adjustment`` returns a non-None *requested* set),
+    any candidate whose frame has NO object labels at all (i.e. the ingest step
+    marked it as a blurry / no-clear-object frame — no entity reached the 0.4
+    present-threshold) is dropped entirely.  This is the hard filter for the
+    "blurry frame" case: such frames never enter the final KIS ranking.  It only
+    fires when the query asks for an object, so pure scene queries are unaffected.
+    If dropping would emptying the whole pool, we fall back to keeping the
+    original candidates (avoid returning zero answers).
+    """
+    requested = _requested_concepts(query)
+    drop_mode = drop_empty_object_frames and bool(requested)
+
+    kept: list[Candidate] = []
     for item in candidates:
+        if drop_mode and item.vector_id is not None:
+            record = records.get(item.vector_id)
+            # A frame with no object labels while the query asks for an object
+            # is the blurry / no-clear-object case -> drop it.
+            if record is not None and not (record.object_labels or []):
+                continue
+        kept.append(item)
+
+    # Fallback: never return an empty pool just because every frame was blurry.
+    if drop_mode and not kept:
+        kept = list(candidates)
+
+    reranked: list[Candidate] = []
+    for item in kept:
         adjustment = None
         if item.vector_id is not None:
             record = records.get(item.vector_id)
             if record is not None:
-                adjustment = object_evidence_adjustment(query, record, weight)
+                adjustment = object_evidence_adjustment(query, record, weight, penalty_scale)
         score = float(item.score) if adjustment is None else float(item.score) + adjustment
         reranked.append(item.model_copy(update={"score": score}))
     return sorted(reranked, key=lambda candidate: candidate.score, reverse=True)

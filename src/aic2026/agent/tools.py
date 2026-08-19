@@ -4,6 +4,7 @@ import logging
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -43,20 +44,50 @@ class RetrievalTools:
     visual_answerer: (
         Callable[[str, list[Candidate]], dict[int, str]] | None
     ) = None
+    # Optional handle to the VLM instance so we can free its weights after QA
+    # answering (low-RAM machines cannot keep CLIP + Florence resident at once).
+    visual_answerer_obj: Any | None = None
+    # VLM construction params. The VLM is NOT created at agent build time; it is
+    # lazily built (see ``ensure_vlm``) only on the QA answer step, AFTER the CLIP
+    # encoder has been freed (``close_text_encoder``). This keeps only ONE heavy
+    # model resident at a time (avoids OOM on low-RAM machines) and means KIS/TRAKE
+    # never pay the Florence load cost. ``visual_answerer_obj`` stays None for
+    # KIS/TRAKE (vlm_model None) so ``ensure_vlm`` is a no-op there.
+    vlm_model: str | None = None
+    vlm_device: str | None = None
+    vlm_dtype: str = "float32"
     encode_images: Callable[[list[object]], np.ndarray] | None = None
     bm25_index: BM25Index | None = None
     # Trọng số metadata bonus (Direction B): nhỏ, cộng trực tiếp lên RRF gốc
     # (KHÔNG normalize). RRF base ~0.01-0.03; weight 0.01 → bonus tối đa +0.01,
     # đủ nudging mà không đảo ngược thứ tự RRF.
     rerank_weight: float = 0.01
+    # Asymmetry of the object-evidence signal (KIS).  A frame shown by the
+    # detector to LACK every object the query asks for is penalized
+    # `object_evidence_weight * object_penalty_scale`, while a full match is only
+    # rewarded `object_evidence_weight`.  This counters CLIP ranking a frame high
+    # for the right scene but the wrong object.  Default 2.0.
+    object_penalty_scale: float = 2.0
+    # Base magnitude of the object-evidence reward/penalty (KIS).  On the RRF
+    # scale (~0.0018–0.016) a value of 0.02–0.05 is a strong but bounded nudge.
+    object_evidence_weight: float = 0.03
+    # Hard-drop frames that have NO object labels at all (ingest marked them as
+    # blurry / no-clear-object, i.e. no entity reached the 0.4 present-threshold)
+    # WHEN the query actually asks for an object.  This is the "blurry frame"
+    # filter: such frames never enter the final KIS ranking.  Off by default so
+    # scene-only queries and weak-detector corpora are unaffected; turn on for
+    # KIS via --drop-empty-object-frames.  Falls back to keeping the pool if
+    # dropping would empty it.
+    drop_empty_object_frames: bool = False
     # Trọng số late-interaction (ColBERT-style MaxSim): encode_text ~200 lần trong
     # retrieve(), RẤT nặng cho thi tốc độ. Mặc định 0.0 (TẮT) — chỉ bật nếu cần
     # tăng recall query dài nhiều từ (rare cho BTC). Có thể bật qua runtime config.
     late_interaction_weight: float = 0.0
     # HSV colour evidence reads only the top image candidates and never calls a
     # VLM.  It is deliberately bounded so CLIP remains the primary signal.
-    colour_rerank_weight: float = 0.04
+    colour_rerank_weight: float = 0.08
     contrastive_colour_rerank_weight: float = 0.06
+    colour_sidecar_path: str | None = None
     # Restrict retrieval to a dataset split by video_id prefix (e.g. ``["L25"]``
     # for QA on online-course videos, ``["L26"]`` for TRAKE). Optional; when set
     # it is intersected with `video_filter_terms` (metadata) so both filters
@@ -219,22 +250,23 @@ class RetrievalTools:
             query=queries[0],
             candidates=candidates,
             records=self._record_lookup(),
+            weight=self.object_evidence_weight,
+            penalty_scale=self.object_penalty_scale,
+            drop_empty_object_frames=self.drop_empty_object_frames,
         )
 
-        candidates = rerank_with_colour_evidence(
-            query=queries[0],
-            candidates=candidates,
-            records=self._record_lookup(),
-            weight=self.colour_rerank_weight,
-        )
-        candidates = contrastive_clip_colour_rerank(
-            query=queries[0],
-            candidates=candidates,
-            records=self._record_lookup(),
-            encode_text=self.encode_text,
-            encode_images=self.encode_images,
-            weight=self.contrastive_colour_rerank_weight,
-        )
+        # Contrastive CLIP Colour Reranking (Option 1):
+        # Crops object boxes/full keyframe image and compares contrastive prompt variants
+        # (e.g. "red car" vs "blue car", "yellow car", etc.) using CLIP.
+        if self.encode_text is not None and self.encode_images is not None:
+            candidates = contrastive_clip_colour_rerank(
+                query=queries[0],
+                candidates=candidates,
+                records=self._record_lookup(),
+                encode_text=self.encode_text,
+                encode_images=self.encode_images,
+                weight=self.contrastive_colour_rerank_weight,
+            )
 
         # KIS is ranked per frame.  Do not aggregate/cap by video here: a
         # candidate rises or falls only on its own retrieval evidence.
@@ -246,9 +278,9 @@ class RetrievalTools:
         # chục nghìn vector) thì vector_id sẽ lệch → skip an toàn, fallback về
         # RRF + metadata bonus, không crash.
         if self.encode_text is not None and candidates:
-            index = self.pipeline.index
-            manifest_size = len(self.pipeline.manifest)
-            index_has_all = True
+            index = getattr(self.pipeline, "index", None)
+            index_has_all = index is not None
+            manifest_size = len(self.pipeline.manifest) if self.pipeline.manifest is not None else 0
             if hasattr(index, "collection_count"):  # ChromaVectorStore
                 try:
                     if index.collection_count != manifest_size:
@@ -286,14 +318,17 @@ class RetrievalTools:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("late-interaction rerank skipped: %s", exc)
 
-        # KIS is video-level: a single high-scoring outlier frame must not lift
-        # the wrong video. Aggregate each video's strongest frames into one
-        # video_score (log-sum-exp), keep the top videos, and re-emit frames
-        # ordered by that video-aware score — so a video with *consistently*
-        # good frames rises above a lone-outlier video, and we still surface
-        # other strong videos instead of spamming frames from one. QA/TRAKE
-        # keep the raw pool (multiple frames per video are meaningful there).
-        if task_type == "kis":
+        # KIS and QA are BOTH video-level: a single high-scoring outlier frame
+        # must not lift the wrong video. Aggregate each video's strongest frames
+        # into one video_score (log-sum-exp), keep the top videos, and re-emit
+        # frames ordered by that video-aware score — so a video with *consistently*
+        # good frames rises above a lone-outlier video, and we still surface other
+        # strong videos instead of spamming frames from one. QA inherits this so
+        # that (a) its candidate ordering matches KIS for the same query, and
+        # (b) the VLM only answers frames from the strongest videos instead of a
+        # raw pool of hundreds. TRAKE keeps the raw pool (multiple frames per
+        # video are meaningful there and it has its own alignment stage).
+        if task_type in ("kis", "qa"):
             top_videos = self.coarse_top_k if self.coarse_top_k and self.coarse_top_k > 0 else None
             candidates = self.pipeline.video_level_rerank(
                 candidates,
@@ -377,13 +412,39 @@ class RetrievalTools:
 
         # Unit-test/lightweight pipelines may not expose manifest records.  The
         # production pipeline always does; in that case apply evidence inside
-        # the event×frame matrix, before temporal DP selects an alignment.
+        # the event×frame matrix (vectorized) before temporal DP selects an
+        # alignment. Building the adjustment as a per-video NumPy matrix — instead
+        # of a per-(event,frame) Python closure — cuts TRAKE latency from ~145s to
+        # a few seconds on the full 177k-frame corpus for a single query.
         object_adjustment = None
+        object_adjustment_matrices = None
         manifest = getattr(self.pipeline, "manifest", None)
-        if manifest:
-            object_adjustment = lambda event_index, manifest_index: object_evidence_adjustment(
-                cleaned_events[event_index], manifest[manifest_index], weight=0.08
-            ) or 0.0
+        video_to_manifest = getattr(
+            self.pipeline, "_video_to_manifest_indices", None
+        )
+        if (
+            manifest
+            and video_to_manifest is not None
+            and not self.trake_dense_refine
+        ):
+            from aic2026.reranking.lexical import (
+                build_object_adjustment_matrices,
+            )
+
+            all_videos = (
+                set(self.pipeline._video_embeddings.keys())
+                if hasattr(self.pipeline, "_video_embeddings")
+                else set(video_to_manifest.keys())
+            )
+            object_adjustment_matrices = (
+                build_object_adjustment_matrices(
+                    events=cleaned_events,
+                    candidate_videos=all_videos,
+                    video_to_manifest_indices=video_to_manifest,
+                    manifest=manifest,
+                    weight=0.08,
+                )
+            )
 
         candidates = self.pipeline.retrieve_trake(
             event_embeddings=event_embeddings,
@@ -395,6 +456,7 @@ class RetrievalTools:
             video_ids=allowed_video_ids,
             coarse_top_k=coarse_top_k,
             object_adjustment=object_adjustment,
+            object_adjustment_matrices=object_adjustment_matrices,
             preferred_prefixes=preferred_prefixes,
         )
 
@@ -441,11 +503,80 @@ class RetrievalTools:
     ) -> dict[int, str]:
         if self.visual_answerer is None:
             return {}
-
+        # Reload the VLM if it was previously closed (cached agent reuse).
+        obj = self.visual_answerer_obj
+        if obj is not None and not getattr(obj, "available", False):
+            try:
+                obj.load()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("answer_question: VLM reload failed: %s", exc)
         return self.visual_answerer(
             question,
             candidates,
         )
+
+    def reload_text_encoder(self) -> None:
+        """Rebuild the CLIP encoder if it was unloaded (cached agent reuse)."""
+        enc = getattr(self.encode_text, "__self__", None)
+        if enc is not None and hasattr(enc, "load"):
+            try:
+                enc.load()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("reload_text_encoder: load failed: %s", exc)
+
+    def close_text_encoder(self) -> None:
+        """Free the CLIP text/image encoder weights to reclaim RAM before the VLM
+        runs (low-RAM machines cannot keep CLIP + Florence resident at once).
+
+        Only the underlying model weights are dropped — the ``encode_text`` /
+        ``encode_images`` callables are preserved so a later retrieve on a *cached*
+        agent can reload them (see ``reload_text_encoder``). We never null out the
+        callables, which previously caused ``'NoneType' object is not callable'``.
+        """
+        enc = getattr(self.encode_text, "__self__", None)
+        if enc is not None and hasattr(enc, "unload"):
+            try:
+                enc.unload()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("close_text_encoder: unload failed: %s", exc)
+
+    def ensure_vlm(self) -> None:
+        """Lazily build the VLM only on the QA answer step, AFTER the CLIP encoder
+        has been freed (``close_text_encoder``). Avoids holding CLIP + Florence
+        resident at once (OOM on low-RAM machines) and means KIS/TRAKE (vlm_model
+        None) never pay the Florence load. No-op when already built or no model.
+        """
+        if self.visual_answerer is not None or not self.vlm_model:
+            return
+        try:
+            from aic2026.qa.florence import FlorenceVLM
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ensure_vlm: cannot import FlorenceVLM: %s", exc)
+            return
+        florence = FlorenceVLM(
+            model_name=self.vlm_model,
+            device=self.vlm_device,
+            torch_dtype=self.vlm_dtype,
+        )
+        florence.load()  # build processor + model now (CLIP already freed)
+        if florence.available:  # only wire up if it actually loaded
+            self.visual_answerer = florence.answer_question
+            self.visual_answerer_obj = florence
+
+    def close_vlm(self) -> None:
+        """Free the VLM (Florence-2) weights after QA answering is complete.
+
+        Only the underlying model is closed — the ``visual_answerer`` callable and
+        ``visual_answerer_obj`` handle are preserved so a later request on a
+        *cached* agent can reload the VLM (see ``answer_question``). We never null
+        them out, which previously caused ``'NoneType' object is not callable'``.
+        """
+        obj = self.visual_answerer_obj
+        if obj is not None and hasattr(obj, "close"):
+            try:
+                obj.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("close_vlm: close failed: %s", exc)
 
     @staticmethod
     def evidence(
