@@ -340,13 +340,15 @@ def build_btc_csv(query: Query, candidates: list[Candidate], selected_idx: list[
 # Gallery renderers (với checkbox chọn) — định nghĩa TRƯỚC phần gọi gallery
 # để tránh NameError khi Streamlit thực thi tuần tự từ trên xuống.
 # ---------------------------------------------------------------------------
-def _toggle(idx: int):
-    # Checkbox tự quản lý trạng thái qua key "sel_{idx}";
+def _toggle(idx: int, nonce: int):
+    # Checkbox tự quản lý trạng thái qua key "sel_{nonce}_{idx}";
     # mình đồng bộ ngược lại vào danh sách "selected" CÓ THỨ TỰ.
     # Frame CHỌN ĐẦU TIÊN nằm TRÊN CÙNG (top 1) của danh sách xuất ra — vì nó
     # là ưu tiên cao nhất. Các frame chọn sau nối TIẾP xuống dưới (giữ nguyên
     # thứ tự chọn đầu→cuối = trên→dưới). Bỏ tick thì loại khỏi danh sách.
-    checked = st.session_state.get(f"sel_{idx}", False)
+    # `nonce` thay đổi mỗi lần chạy query mới → key checkbox hoàn toàn mới →
+    # không bao giờ nhớ tick của query trước (reset cứng, không phụ thuộc xóa state).
+    checked = st.session_state.get(f"sel_{nonce}_{idx}", False)
     s = st.session_state["selected"]
     if checked:
         if idx not in s:
@@ -360,6 +362,9 @@ def _toggle(idx: int):
 
 
 def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], root: Path, selected: list[int]) -> None:
+    # nonce thay đổi mỗi query mới → key checkbox "sel_{nonce}_{idx}" luôn mới,
+    # không nhớ tick của query trước (reset cứng).
+    nonce = int(st.session_state.get("_query_nonce", 0))
     st.subheader(f"Gallery ({len(visible)} ảnh)")
     grid = st.columns(5)
     for pos, (idx, item) in enumerate(visible):
@@ -387,11 +392,11 @@ def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
                 unsafe_allow_html=True,
             )
             # Checkbox chọn nằm DƯỚI CÙNG, cách xa ảnh (tránh bấm nhầm khi lướt).
-            st.checkbox("Chọn", key=f"sel_{idx}", value=(idx in selected), on_change=_toggle, args=(idx,), label_visibility="collapsed")
+            st.checkbox("Chọn", key=f"sel_{nonce}_{idx}", value=(idx in selected), on_change=_toggle, args=(idx, nonce), label_visibility="collapsed")
             st.markdown("</div>", unsafe_allow_html=True)
 
 
-def _render_trake_gallery(query: Query, visible: list[tuple[int, Candidate]], root: Path, selected: set[int]) -> None:
+def _render_trake_gallery(query: Query, visible: list[tuple[int, Candidate]], root: Path, selected: list[int]) -> None:
     try:
         manifest_path = st.session_state.get("manifest_path")
         lookup = load_keyframe_lookup(manifest_path) if manifest_path else {}
@@ -428,7 +433,8 @@ def _render_trake_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
                         else:
                             st.caption("Không có ảnh")
                         st.caption(f"**{ev_text}**\nframe {frame_id}")
-        st.checkbox("Chọn video này", key=f"sel_{idx}", value=(idx in selected), on_change=_toggle, args=(idx,))
+        nonce = int(st.session_state.get("_query_nonce", 0))
+        st.checkbox("Chọn video này", key=f"sel_{nonce}_{idx}", value=(idx in selected), on_change=_toggle, args=(idx, nonce))
         st.divider()
 
 
@@ -562,9 +568,8 @@ if st.session_state.get("_run_agent"):
                         qa_question=question,
                         qa_runtime=runtime,
                         qa_backend_url=backend_url,
+                        _query_nonce=st.session_state.get("_query_nonce", 0) + 1,
                     )
-                    for k in [key for key in st.session_state.keys() if key.startswith("sel_") or key.startswith("pick_")]:
-                        del st.session_state[k]
                     st.rerun()
                 else:
                     # KIS / TRAKE: giữ nguyên luồng cũ
@@ -577,10 +582,8 @@ if st.session_state.get("_run_agent"):
                         raw_root=st.session_state.get("cfg_root", "data/processed"),
                         manifest_path=runtime["manifest_path"],
                         selected=[],
+                        _query_nonce=st.session_state.get("_query_nonce", 0) + 1,
                     )
-                    # Xóa trạng thái widget button chọn cũ (pick_*)
-                    for k in [key for key in st.session_state.keys() if key.startswith("sel_") or key.startswith("pick_")]:
-                        del st.session_state[k]
 
                 # Bản dịch (giữ nguyên cho mọi luồng)
                 translated = None
@@ -691,15 +694,6 @@ else:
     if "selected" not in st.session_state or not isinstance(st.session_state["selected"], list):
         st.session_state["selected"] = []
     selected: list[int] = st.session_state["selected"]
-
-    # Xóa trạng thái widget checkbox cũ (sel_*) MỖI lần render để checkbox luôn
-    # phản ánh đúng danh sách `selected` (single source of truth). Nhờ đó:
-    #  - Chạy query mới (selected=[]) → checkbox tạo lại trắng, không nhớ tick cũ.
-    #  - Bấm "Chọn tất cả" → frame mới thêm vào list tự động tick đúng.
-    #  (Không dùng @st.fragment nên rerun toàn trang; vị trí cuộn nhảy lên đầu
-    #   nhưng đổi lại reset sạch sẽ, ưu tiên theo ý user.)
-    for k in [key for key in st.session_state.keys() if key.startswith("sel_") or key.startswith("pick_")]:
-        del st.session_state[k]
 
     if not candidates:
         st.warning("Agent không trả candidate. Hãy kiểm tra index hoặc đổi query.")
