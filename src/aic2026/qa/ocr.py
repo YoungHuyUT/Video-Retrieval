@@ -88,11 +88,31 @@ class OCRTextExtractor:
         lang: str = "vi",
         model_size: str = "medium",
         correct: bool = True,
+        device: str = "cpu",
         **paddle_kwargs: object,
     ) -> None:
         self.lang = lang
         self.model_size = model_size
         self.correct = correct
+        # Inference device for PaddleOCR 3.x: "cpu" (default), "gpu", or
+        # "gpu:0". The local dev machine has no GPU, so the default keeps OCR
+        # running on CPU; pass --device gpu on a Colab T4 / CUDA box for a
+        # 10-20x speedup. We validate CUDA availability here so a misconfigured
+        # GPU request fails loudly (with a clear fix) instead of dying deep in
+        # Paddle's C++ init.
+        self.device = device
+        if device.startswith("gpu"):
+            import paddle  # local import keeps CPU installs light
+
+            if not paddle.is_compiled_with_cuda():
+                raise RuntimeError(
+                    "OCR device='gpu' nhưng PaddlePaddle hiện tại KHÔNG được build "
+                    "với CUDA (paddle.is_compiled_with_cuda() == False). Cài đặt "
+                    "paddlepaddle-gpu tương ứng (vd trên Colab: "
+                    "`pip install paddlepaddle-gpu==3.2.0 -f "
+                    "https://www.paddlepaddle.org.cn/whl/linux/cuda12.0/`) rồi chạy lại, "
+                    "hoặc dùng --device cpu."
+                )
         # Keyframes are ordinary video frames, not scanned documents. PaddleOCR
         # v3 enables three document-preprocessing models by default; they add
         # several downloads and substantial RAM use but do not help normal
@@ -101,6 +121,7 @@ class OCRTextExtractor:
             "use_doc_orientation_classify": False,
             "use_doc_unwarping": False,
             "use_textline_orientation": False,
+            "device": self.device,
             **paddle_kwargs,
         }
         # PP-OCRv6 ships both a `medium` (default, accurate) and a `mobile`

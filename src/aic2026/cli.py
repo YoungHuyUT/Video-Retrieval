@@ -367,9 +367,20 @@ def build_chroma_index(
 
 
 def _resolve_keyframe_path(record: object, keyframes_root: Path) -> Path | None:
-    """Find the keyframe JPG for a record, trying absolute + two relative layouts."""
+    """Find the keyframe JPG for a record, trying several layouts.
+
+    ``record.keyframe_path`` is stored RELATIVE to the project root, so a plain
+    ``Path(record.keyframe_path)`` only resolves when the process cwd happens to
+    be the project root. If the CLI is launched from elsewhere (or as a detached
+    background task whose cwd defaults to the user's home), that candidate
+    misses and we silently get ``images=0`` — the exact bug seen when running
+    OCR away from the project dir. Always also try the project root so the
+    lookup is cwd-independent.
+    """
+    proj_root = Path(__file__).resolve().parents[2]
     candidates = [
         Path(record.keyframe_path),
+        proj_root / record.keyframe_path,
         keyframes_root / record.video_id / Path(record.keyframe_path).name,
         keyframes_root / record.keyframe_path,
     ]
@@ -437,6 +448,7 @@ def ocr_manifest(
     batch_size: int = typer.Option(16, min=1),
     lang: str = typer.Option("vi", help="Ngôn ngữ OCR: vi | en"),
     model_size: str = typer.Option("medium", help="PP-OCRv6 checkpoint: medium (chuẩn, chính xác) | mobile (nhanh 3–5x, hơi kém chính xác)"),
+    device: str = typer.Option("cpu", help="Thiết bị inference: cpu (mặc định, máy local không GPU) | gpu | gpu:0. Trên Colab T4 (CUDA) dùng gpu để nhanh 10–20x. Yêu cầu paddlepaddle-gpu đã cài."),
     correct: bool = typer.Option(True, help="Chạy post-correction Tiếng Việt (sửa dấu vỡ, rn→m, lọc token rác) sau OCR. Tắt nếu muốn text thô."),
     resume: bool = typer.Option(False, help="Tiếp tục từ chỗ dở: bỏ qua các record đã có flag ocr_done=True trong output cũ (không OCR lại). Dùng khi chạy bị ngắt giữa chừng."),
     shard_count: int = typer.Option(1, min=1, help="Chia manifest thành N shard để chạy song song nhiều process (CPU). Dùng cùng --shard-id."),
@@ -505,7 +517,7 @@ def ocr_manifest(
         ocr_records = records
         passthrough = []
 
-    extractor = OCRTextExtractor(lang=lang, model_size=model_size, correct=correct)
+    extractor = OCRTextExtractor(lang=lang, model_size=model_size, correct=correct, device=device)
     extractor._ensure_loaded()
     if extractor._ocr is None:
         typer.echo(
@@ -687,12 +699,22 @@ def agent_query(
             f"features={resolved_features}"
         )
     manifest_records = load_manifest(resolved_manifest)
+    # Per-video metadata (title/description/keywords) sống cùng thư mục với
+    # manifest. Load vào store để pipeline chạy được metadata pre-filter
+    # (filter_videos_by_metadata) — nếu không truyền, store rỗng và pre-filter
+    # bị skip dù tools.video_filter_terms có set.
+    from aic2026.retrieval import VideoMetadataStore
+
+    video_metadata = VideoMetadataStore.load(
+        resolved_manifest.parent / "video_metadata.jsonl"
+    )
 
     index = load_index_for_query(resolved_features, manifest_records, backend=backend, chroma_dir=chroma_dir)
     pipeline = RetrievalPipeline(
         index,
         manifest_records,
         frames_per_video=20,
+        video_metadata=video_metadata,
     )
     text_encoder = OpenCLIPTextEmbedder()
     encode_text = text_encoder.encode
@@ -758,10 +780,11 @@ def export_submission(
     """Chuyển kết quả JSON của `agent-query` thành 1 dòng CSV nộp bài BTC.
 
     Đây là bước bạn đang thiếu: `agent-query` chỉ xuất JSON (có event_frames ở
-    trong), còn BTC yêu cầu file CSV theo đúng định dạng mỗi task:
-      - KIS : ``<video_id>,<frame_id>``
-      - Q&A : ``<video_id>,<frame_id>,<answer>``
-      - TRAKE: ``<video_id>,<frame_1>,<frame_2>,...,<frame_N>``  (N = số event)
+    trong), còn BTC yêu cầu file CSV theo đúng định dạng mỗi task (trường cách
+    nhau bởi ", " — dấu phẩy + 1 dấu cách):
+      - KIS : ``<video_id>, <frame_id>``
+      - Q&A : ``<video_id>, <frame_id>, <answer>``
+      - TRAKE: ``<video_id>, <frame_1>, <frame_2>, ..., <frame_N>``  (N = số event)
 
     Với TRAKE, dòng này CHỨA ĐỦ các frame event (khác với KIS chỉ 1 frame),
     nên kết quả sẽ KHÔNG còn 'giống KIS'. Dùng sau mỗi `agent-query`:

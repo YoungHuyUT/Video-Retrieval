@@ -391,8 +391,17 @@ def build_official_index(
                     vi + 1, total_videos, written_records, empty_object_videos,
                 )
 
+    # Track videos that will fall back to ORDINAL frame_id (no map-keyframes CSV
+    # AND no per-frame_indices in metadata). For TRAKE, event answers are scored
+    # as frame ranges against ground truth; an ordinal frame_id (keyframe ordinal,
+    # not the original video frame index) lands outside the GT ranges and scores
+    # 0. The whole-corpus guard in `prepare-official` already fails when the
+    # map-keyframes folder is missing entirely; this surfaces the per-video case
+    # that would otherwise pass silently and corrupt TRAKE output.
+    ordinal_fallback_videos: list[str] = []
     for video_id in sorted(by_video_count):
         expected = _expected_frame_indices(metadata_root, video_id)
+        csv_frames = _load_keyframe_frame_ids(map_root, video_id) if map_root else None
         if expected and len(expected) != by_video_count[video_id]:
             logger.warning(
                 "video %s: metadata lists %d frame indices but %d feature rows found; "
@@ -401,6 +410,17 @@ def build_official_index(
                 len(expected),
                 by_video_count[video_id],
             )
+        if not expected and not csv_frames:
+            ordinal_fallback_videos.append(video_id)
+    if ordinal_fallback_videos:
+        logger.warning(
+            "TRAKE RISK: %d video(s) have NEITHER map-keyframes CSV NOR metadata "
+            "frame_indices, so their frame_id falls back to keyframe ORDINAL "
+            "(not the original video frame index). TRAKE answers for these will "
+            "likely score 0 against BTC ground-truth ranges. Affected (first 20): %s",
+            len(ordinal_fallback_videos),
+            ", ".join(ordinal_fallback_videos[:20]),
+        )
 
     # The official .npy is documented as one row per keyframe in ascending
     # keyframe order. Both the manifest rows and the .npy rows are produced in

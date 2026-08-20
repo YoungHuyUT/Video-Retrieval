@@ -138,13 +138,24 @@ def load_orchestrator(
         )
         raise FileNotFoundError(f"Thiếu index retrieval: {', '.join(missing)}. {hint}")
     manifest_records = load_manifest(manifest_file)
+    # Per-video metadata (title/description/keywords) sống cùng thư mục với
+    # manifest. Load vào store để pipeline chạy được metadata pre-filter
+    # (filter_videos_by_metadata) — nếu không truyền, store rỗng và pre-filter
+    # bị skip dù tools.video_filter_terms có set.
+    from aic2026.retrieval import VideoMetadataStore
+
+    video_metadata = VideoMetadataStore.load(
+        manifest_file.parent / "video_metadata.jsonl"
+    )
     index = load_index_for_query(
         features_file,
         manifest_records,
         backend=backend,
         chroma_dir=chroma_dir,
     )
-    pipeline = RetrievalPipeline(index, manifest_records, frames_per_video=20)
+    pipeline = RetrievalPipeline(
+        index, manifest_records, frames_per_video=20, video_metadata=video_metadata
+    )
     text_encoder = OpenCLIPTextEmbedder(pretrained=clip_pretrained)
     tools = RetrievalTools(
         pipeline, text_encoder.encode, encode_images=text_encoder.encode_images

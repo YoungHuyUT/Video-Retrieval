@@ -35,35 +35,82 @@ def competition_answer(query: Query, candidate: Candidate) -> dict:
     raise ValueError(f"No competition output adapter registered for query type: {query.type}")
 
 
-def _quote(value: str) -> str:
-    """Always RFC 4180-quote a Q&A answer.
+# Field separator mandated by the BTC submission brief: a single comma, no
+# surrounding space (plain RFC 4180). All three streams (KIS / Q&A / TRAKE)
+# join EVERY field with this. video_id / frame_id are never quoted.
+CSV_FIELD_SEP = ","
 
-    Every non-empty Q&A answer is wrapped in double quotes. Internal double
-    quotes are escaped by doubling (``"`` -> ``""``). Embedded newlines and
-    leading/trailing whitespace are preserved verbatim (never trimmed / stripped).
+# Characters that, if present in a Q&A answer, force RFC-4180 quoting so the
+# BTC evaluator parses the field correctly. Mirrors the brief's six rules.
+_REQUIRED_QUOTE_CHARS = (",", '"', "\n", "\r")
+
+
+def _answer_needs_quoting(answer: str) -> bool:
+    """Whether a Q&A ``answer`` MUST be wrapped in double quotes to survive CSV.
+
+    Encodes the BTC brief's six rules verbatim:
+
+    * comma  in answer -> MUST quote (splits the field otherwise)
+    * quote  in answer -> MUST quote + double the inner quotes
+    * newline in answer -> MUST quote
+    * leading/trailing whitespace -> MUST quote so it is preserved verbatim
+      (a strict CSV reader trims an unquoted field, so quoting is the only way
+      to honour the "không tự động trim" requirement)
+    * a plain answer with none of the above -> LEFT UNQUOTED (e.g. ``5``,
+      ``Năm người``, ``Màu đỏ``)
     """
-    if value is None:
-        value = ""
-    escaped = value.replace('"', '""')
-    return '"' + escaped + '"'
+    if not answer:
+        return False
+    if any(ch in answer for ch in _REQUIRED_QUOTE_CHARS):
+        return True
+    # Leading/trailing whitespace must be quoted or a strict reader trims it.
+    if answer != answer.strip():
+        return True
+    return False
+
+
+def _format_answer(answer: str) -> str:
+    """Format a Q&A answer per BTC quoting rules. Never trimmed/stripped."""
+    if _answer_needs_quoting(answer):
+        escaped = answer.replace('"', '""')
+        return '"' + escaped + '"'
+    return answer
 
 
 def csv_row(query: Query, candidate: Candidate) -> str:
-    """One CSV line per the AIC 2026 submission brief.
+    """One CSV submission line covering EVERY BTC format rule.
 
-    - KIS:   ``<video_id>,<frame_id>``
-    - Q&A:   ``<video_id>,<frame_id>,<answer>`` (answer always RFC 4180-quoted:
-      wrapped in double quotes, internal quotes doubled, newlines/whitespace
-      preserved, never trimmed)
-    - TRAKE: ``<video_id>,<frame_1>,<frame_2>,...,<frame_N>``
+    Separator rule: all fields are joined by a single comma (no surrounding
+    space), per the BTC brief.
+
+    Quoting rule: applies ONLY to the Q&A answer, and ONLY when it contains a
+    special character or leading/trailing whitespace. video_id / frame_id are
+    never quoted (they carry no special characters and must not be altered).
+
+    Output shapes:
+      KIS   : ``<video_id>,<frame_id>``
+      Q&A   : ``<video_id>,<frame_id>,<answer>``            (answer may be quoted)
+      TRAKE : ``<video_id>,<f1>,<f2>,...,<fN>``
+
+    This is the single source of truth for submission formatting; both
+    ``write_submission`` and ``export-submission`` route through it.
     """
     if query.type == "kis":
-        return f"{candidate.video_id},{candidate.frame_id}"
+        return CSV_FIELD_SEP.join([
+            candidate.video_id,
+            str(candidate.frame_id),
+        ])
     if query.type == "qa":
-        return f"{candidate.video_id},{candidate.frame_id},{_quote(candidate.answer or '')}"
+        return CSV_FIELD_SEP.join([
+            candidate.video_id,
+            str(candidate.frame_id),
+            _format_answer(candidate.answer or ""),
+        ])
     if query.type == "trake":
         frames = candidate.event_frames or []
-        return f"{candidate.video_id}," + ",".join(str(f) for f in frames)
+        return CSV_FIELD_SEP.join(
+            [candidate.video_id, *[str(f) for f in frames]]
+        )
     raise ValueError(f"No CSV adapter registered for query type: {query.type}")
 
 

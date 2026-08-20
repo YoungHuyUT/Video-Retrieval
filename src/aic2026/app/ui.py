@@ -110,6 +110,20 @@ html, body, [data-testid="stAppViewContainer"] { font-family: system-ui, -apple-
 .stCheckbox > label { font-weight:700; color:var(--peg-ink); }
 input[type="checkbox"]:checked { accent-color:#c97aa6; }
 
+/* ---- Card clickable: toàn bộ ảnh là vùng bấm chọn (nút trong suốt phủ lên) ---- */
+.frame-card { position: relative; border-radius:.6rem; }
+.frame-card .stButton > button {
+  position:absolute; top:0; left:0; width:100%; height:100%; min-height:100%;
+  opacity:0; border:none; background:transparent; padding:0; margin:0; cursor:pointer; }
+.frame-card.selected .hero-wrap {
+  border:3px solid #c97aa6;
+  box-shadow:0 0 0 3px rgba(201,122,166,.35), 0 12px 24px rgba(227,163,196,.30); }
+.frame-card .frame-pick-hint {
+  position:absolute; top:.35rem; right:.35rem; z-index:2;
+  background:rgba(201,122,166,.92); color:#fff; font-size:.62rem; font-weight:800;
+  padding:.12rem .4rem; border-radius:999px; opacity:0; transition:opacity .15s ease; }
+.frame-card.selected .frame-pick-hint { opacity:1; }
+
 [data-testid="stSlider"] { color:#8b6fb5; }
 
 /* ---- Ô nhập liệu (text input) có viền đẹp ---- */
@@ -304,19 +318,21 @@ def file_link(path: Path | None) -> str | None:
 
 
 def build_btc_json(query: Query, candidates: list[Candidate], selected_idx: list[int]) -> list[dict]:
-    """Chỉ lấy candidate được tick, sort score giảm dần, format đúng BTC."""
+    """Chỉ lấy candidate được tick, GIỮ NGUYÊN THỨ TỰ CHỌN (không sort score).
+
+    Thứ tự xuất = thứ tự user click (frame mới click nhất ở đầu).
+    """
     picked = [candidates[i] for i in selected_idx if 0 <= i < len(candidates)]
-    picked.sort(key=lambda c: c.score, reverse=True)
     return [competition_answer(query, c) for c in picked]
 
 
 def build_btc_csv(query: Query, candidates: list[Candidate], selected_idx: list[int]) -> str:
-    """Chỉ lấy candidate được tick, sort score giảm dần, format CSV chuẩn BTC.
+    """Chỉ lấy candidate được tick, GIỮ NGUYÊN THỨ TỰ CHỌN (không sort score).
 
-    Trả về text CSV thuần túy (không header row, LF), sẵn sàng tải về nộp bài.
+    Thứ tự xuất = thứ tự user click (frame mới click nhất ở đầu). Trả về
+    text CSV thuần túy (không header row, LF), sẵn sàng tải về nộp bài.
     """
     picked = [candidates[i] for i in selected_idx if 0 <= i < len(candidates)]
-    picked.sort(key=lambda c: c.score, reverse=True)
     return "\n".join(csv_row(query, c) for c in picked)
 
 
@@ -326,22 +342,29 @@ def build_btc_csv(query: Query, candidates: list[Candidate], selected_idx: list[
 # ---------------------------------------------------------------------------
 def _toggle(idx: int):
     # Checkbox tự quản lý trạng thái qua key "sel_{idx}";
-    # mình chỉ đồng bộ ngược lại vào set "selected".
+    # mình đồng bộ ngược lại vào danh sách "selected" CÓ THỨ TỰ.
+    # Frame CHỌN ĐẦU TIÊN nằm TRÊN CÙNG (top 1) của danh sách xuất ra — vì nó
+    # là ưu tiên cao nhất. Các frame chọn sau nối TIẾP xuống dưới (giữ nguyên
+    # thứ tự chọn đầu→cuối = trên→dưới). Bỏ tick thì loại khỏi danh sách.
     checked = st.session_state.get(f"sel_{idx}", False)
     s = st.session_state["selected"]
     if checked:
-        s.add(idx)
+        if idx not in s:
+            if not s:
+                s.insert(0, idx)      # frame đầu chọn → trên cùng (top 1)
+            else:
+                s.append(idx)          # chọn sau → nối tiếp phía dưới
     else:
-        s.discard(idx)
+        if idx in s:
+            s.remove(idx)
 
 
-def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], root: Path, selected: set[int]) -> None:
+def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], root: Path, selected: list[int]) -> None:
     st.subheader(f"Gallery ({len(visible)} ảnh)")
     grid = st.columns(5)
     for pos, (idx, item) in enumerate(visible):
         path = keyframe_file(item, root)
         with grid[pos % 5]:
-            is_sel = idx in selected
             if path and path.exists():
                 st.markdown(f'<div class="gallery-card-container" data-video-id="{html.escape(item.video_id)}">', unsafe_allow_html=True)
                 st.markdown('<div class="hero-wrap">', unsafe_allow_html=True)
@@ -363,7 +386,8 @@ def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
                 f"{answer_html}</div>",
                 unsafe_allow_html=True,
             )
-            st.checkbox("Chọn", key=f"sel_{idx}", on_change=_toggle, args=(idx,), label_visibility="collapsed")
+            # Checkbox chọn nằm DƯỚI CÙNG, cách xa ảnh (tránh bấm nhầm khi lướt).
+            st.checkbox("Chọn", key=f"sel_{idx}", value=(idx in selected), on_change=_toggle, args=(idx,), label_visibility="collapsed")
             st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -404,7 +428,7 @@ def _render_trake_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
                         else:
                             st.caption("Không có ảnh")
                         st.caption(f"**{ev_text}**\nframe {frame_id}")
-        st.checkbox("Chọn video này", key=f"sel_{idx}", on_change=_toggle, args=(idx,))
+        st.checkbox("Chọn video này", key=f"sel_{idx}", value=(idx in selected), on_change=_toggle, args=(idx,))
         st.divider()
 
 
@@ -533,13 +557,13 @@ if st.session_state.get("_run_agent"):
                         trace=result.trace,
                         raw_root=st.session_state.get("cfg_root", "data/processed"),
                         manifest_path=runtime["manifest_path"],
-                        selected=set(),
+                        selected=[],
                         qa_answers_ready=False,   # phase 2 chưa chạy
                         qa_question=question,
                         qa_runtime=runtime,
                         qa_backend_url=backend_url,
                     )
-                    for k in [key for key in st.session_state.keys() if key.startswith("sel_")]:
+                    for k in [key for key in st.session_state.keys() if key.startswith("sel_") or key.startswith("pick_")]:
                         del st.session_state[k]
                     st.rerun()
                 else:
@@ -552,10 +576,10 @@ if st.session_state.get("_run_agent"):
                         trace=result.trace,
                         raw_root=st.session_state.get("cfg_root", "data/processed"),
                         manifest_path=runtime["manifest_path"],
-                        selected=set(),
+                        selected=[],
                     )
-                    # Xóa trạng thái widget checkbox cũ (sel_*)
-                    for k in [key for key in st.session_state.keys() if key.startswith("sel_")]:
+                    # Xóa trạng thái widget button chọn cũ (pick_*)
+                    for k in [key for key in st.session_state.keys() if key.startswith("sel_") or key.startswith("pick_")]:
                         del st.session_state[k]
 
                 # Bản dịch (giữ nguyên cho mọi luồng)
@@ -663,10 +687,19 @@ else:
     query: Query = st.session_state["query"]
     candidates: list[Candidate] = st.session_state["candidates"]
     root = Path(st.session_state.get("raw_root", "data/processed"))
-    # Đảm bảo session selected là set hợp lệ
-    if "selected" not in st.session_state or not isinstance(st.session_state["selected"], set):
-        st.session_state["selected"] = set()
-    selected: set[int] = st.session_state["selected"]
+    # Đảm bảo session selected là list có thứ tự hợp lệ (không phải set cũ)
+    if "selected" not in st.session_state or not isinstance(st.session_state["selected"], list):
+        st.session_state["selected"] = []
+    selected: list[int] = st.session_state["selected"]
+
+    # Xóa trạng thái widget checkbox cũ (sel_*) MỖI lần render để checkbox luôn
+    # phản ánh đúng danh sách `selected` (single source of truth). Nhờ đó:
+    #  - Chạy query mới (selected=[]) → checkbox tạo lại trắng, không nhớ tick cũ.
+    #  - Bấm "Chọn tất cả" → frame mới thêm vào list tự động tick đúng.
+    #  (Không dùng @st.fragment nên rerun toàn trang; vị trí cuộn nhảy lên đầu
+    #   nhưng đổi lại reset sạch sẽ, ưu tiên theo ý user.)
+    for k in [key for key in st.session_state.keys() if key.startswith("sel_") or key.startswith("pick_")]:
+        del st.session_state[k]
 
     if not candidates:
         st.warning("Agent không trả candidate. Hãy kiểm tra index hoặc đổi query.")
@@ -747,17 +780,34 @@ else:
                 )
         with col_all:
             if st.button("Chọn tất cả hiển thị", use_container_width=True):
+                # Giữ NGUYÊN thứ tự những gì user đã chọn trước đó (đầu danh sách).
+                # Chỉ nối thêm các frame đang hiển thị mà CHƯA được chọn, theo
+                # thứ tự hiển thị (score giảm dần). Không xáo trộn, không đẩy
+                # các lựa chọn cũ xuống dưới.
                 vis_idx = [
                     i for i, c in enumerate(candidates)
                     if (selected_video == "Tất cả" or c.video_id == selected_video)
                 ][:max_show]
-                selected.update(vis_idx)
+                for i in vis_idx:
+                    if i not in selected:
+                        selected.append(i)
                 st.rerun()
 
-        visible = [
+        # Hiển thị: ĐƯA CÁC FRAME ĐÃ CHỌN LÊN ĐẦU (theo thứ tự chọn), phần còn lại
+        # giữ nguyên thứ tự score bên dưới. Nhờ đó khi user tick vài frame, chúng
+        # nhảy lên trên cùng ngay, dễ thấy; và danh sách xuất ra cũng bắt đầu bằng
+        # những frame đã chọn (frame chọn đầu = trên cùng = top 1).
+        filtered = [
             (i, c) for i, c in enumerate(candidates)
             if (selected_video == "Tất cả" or c.video_id == selected_video)
-        ][:max_show]
+        ]
+        sel_set = set(selected)
+        chosen = [(i, c) for (i, c) in filtered if i in sel_set]
+        rest = [(i, c) for (i, c) in filtered if i not in sel_set]
+        # Sắp xếp lại chosen theo thứ tự trong `selected` (đầu tiên = trên cùng)
+        order = {idx: pos for pos, idx in enumerate(selected)}
+        chosen.sort(key=lambda ic: order.get(ic[0], len(selected)))
+        visible = (chosen + rest)[:max_show]
 
         # ---- Gallery ảnh ----
         if query.type == "TRAKE":
@@ -790,9 +840,9 @@ else:
         # ---- Thanh xuất CSV chuẩn nộp bài BTC ----
         st.divider()
         n_sel = len(selected)
-        st.markdown(f"**Đã chọn {n_sel} ảnh** (sẽ xuất theo thứ tự score giảm dần).")
+        st.markdown(f"**Đã chọn {n_sel} ảnh** (xuất theo thứ tự chọn — frame click trước ở đầu).")
         if n_sel > 0:
-            btc_csv = build_btc_csv(query, candidates, sorted(selected))
+            btc_csv = build_btc_csv(query, candidates, selected)
             col_dl, col_cl = st.columns([1, 2])
             with col_dl:
                 st.download_button(

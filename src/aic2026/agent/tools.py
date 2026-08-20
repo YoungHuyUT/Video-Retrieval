@@ -299,24 +299,36 @@ class RetrievalTools:
                 index_has_all = False
 
             if index_has_all:
-                try:
-                    frame_vectors = np.stack(
-                        [index.vectors[c.vector_id] for c in candidates]
-                    )
-                    candidates = late_interaction_rerank(
-                        query=queries[0],
-                        candidates=candidates,
-                        encode_text=self.encode_text,
-                        frame_vectors=frame_vectors,
-                        top_n=200,
-                        weight=self.late_interaction_weight,
-                    )
-                    # late_interaction chỉ sửa score tại chỗ, cần sort lại.
-                    candidates = sorted(
-                        candidates, key=lambda c: c.score, reverse=True
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("late-interaction rerank skipped: %s", exc)
+                # Late-interaction indexes ``index.vectors[c.vector_id]`` — the
+                # manifest row. Refined TRAKE candidates can carry ``vector_id=None``
+                # (dense_refinement drops it), which would IndexError here. Skip
+                # those: rerank only the candidates that still map to a row, and
+                # merge the untouched ones back in afterwards.
+                indexed = [c for c in candidates if c.vector_id is not None]
+                if indexed:
+                    try:
+                        frame_vectors = np.stack(
+                            [index.vectors[c.vector_id] for c in indexed]
+                        )
+                        reranked = late_interaction_rerank(
+                            query=queries[0],
+                            candidates=indexed,
+                            encode_text=self.encode_text,
+                            frame_vectors=frame_vectors,
+                            top_n=200,
+                            weight=self.late_interaction_weight,
+                        )
+                        # Re-merge: keep candidates without a vector_id untouched.
+                        reranked_ids = {id(c) for c in reranked}
+                        candidates = reranked + [
+                            c for c in candidates if id(c) not in reranked_ids
+                        ]
+                        # late_interaction chỉ sửa score tại chỗ, cần sort lại.
+                        candidates = sorted(
+                            candidates, key=lambda c: c.score, reverse=True
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("late-interaction rerank skipped: %s", exc)
 
         # KIS and QA are BOTH video-level: a single high-scoring outlier frame
         # must not lift the wrong video. Aggregate each video's strongest frames
