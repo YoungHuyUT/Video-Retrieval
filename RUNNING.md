@@ -24,26 +24,34 @@
 
 ### Các bước cài đặt:
 
-Mở terminal (PowerShell trên Windows) tại thư mục gốc của dự án:
+Mở terminal tại thư mục gốc của dự án:
 
+#### ⚡ Cách 1: Dùng `uv` (Khuyên dùng — Cực nhanh ~2-5 giây)
 ```powershell
-# 1. Kích hoạt môi trường ảo Python của bạn (nếu có)
+# Kích hoạt môi trường ảo
+.venv\Scripts\Activate
+
+# Tự động đồng bộ toàn bộ thư viện & extras (retrieval, models, video, asr, dev)
+uv sync --extra retrieval --extra models --extra video --extra asr --extra dev
+```
+
+#### 📦 Cách 2: Dùng `pip` tiêu chuẩn
+```powershell
+# 1. Kích hoạt môi trường ảo (ví dụ conda hoặc venv)
 # conda activate aic2026  HOẶC  .venv\Scripts\Activate
 
-# 2. Cài đặt gói aic2026 ở chế độ editable
-pip install -e .
+# 2. Cài đặt trọn gói aic2026 cùng toàn bộ dependencies
+pip install -e ".[retrieval,models,video,asr,dev]"
 
-# 3. Cài đặt các gói phụ trợ cho tìm kiếm đa phương thức & giao diện
-pip install rank-bm25 faster-whisper open-clip-torch streamlit fastapi uvicorn
-
-# 4. (Nếu dùng GPU NVIDIA trên Windows) Cài đặt thư viện CUDA runtime
+# 3. (Nếu dùng GPU NVIDIA trên Windows) Cài đặt thư viện CUDA runtime cho Whisper
 pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 ```
 
 > [!NOTE]
-> **Kiểm tra FAISS:**
+> **Kiểm tra FAISS & Cuda GPU:**
 > ```powershell
 > python -c "import faiss; print('FAISS version:', faiss.__version__)"
+> python -c "import ctranslate2; print('CUDA Devices:', ctranslate2.get_cuda_device_count())"
 > ```
 > *(Nếu máy chưa có FAISS, hệ thống sẽ tự động dùng fallback NumPy Vector Search mà không gây lỗi).*
 
