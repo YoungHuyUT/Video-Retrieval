@@ -658,6 +658,96 @@ def ocr_merge_shards(
     typer.echo(f"Gộp {len(shards)} shard → {total:,} records vào {output}")
 
 
+@app.command("extract-asr")
+def extract_asr(
+    videos_dir: Path = typer.Option(Path("data/raw/Videos"), help="Thư mục chứa video .mp4"),
+    output_dir: Path = typer.Option(Path("data/processed/asr"), help="Thư mục lưu các file JSON transcript ASR (<video_id>.json)"),
+    model_size: str = typer.Option("small", help="Kích thước model Whisper (tiny | base | small | medium | large-v3 | large-v3-turbo)"),
+    device: str = typer.Option("auto", help="Device chạy Whisper: auto | cpu | cuda"),
+    compute_type: str = typer.Option("default", help="Compute type: default | int8 | float16"),
+    lang: str = typer.Option("vi", help="Mã ngôn ngữ: vi (tiếng Việt) | en | none (tự nhận diện)"),
+    video_prefix: str = typer.Option("", help="Tiền tố video để lọc (vd: L21 hoặc L21,L22). Để trống = tất cả video."),
+    resume: bool = typer.Option(True, help="Bỏ qua các video đã có file JSON transcript trong output_dir."),
+    initial_prompt: str = typer.Option(
+        "Đây là bản tin thời sự, phóng sự truyền hình, tài liệu, thể thao, văn hóa bằng tiếng Việt chuẩn chính tả.",
+        help="Prompt gợi ý từ vựng, ngữ cảnh chuẩn chính tả tiếng Việt cho Whisper.",
+    ),
+    vad: bool = typer.Option(True, help="Bật Voice Activity Detection (VAD) lọc bỏ đoạn im lặng/nhạc nền để tránh ảo giác."),
+) -> None:
+    """Tự động bóc tách lời thoại (ASR) từ file video .mp4 thành các file JSON có mốc thời gian."""
+    from aic2026.data_platform.asr import ASRExtractor
+
+    lang_param = None if lang.lower() in ("none", "", "auto") else lang
+    extractor = ASRExtractor(
+        model_size=model_size,
+        device=device,
+        compute_type=compute_type,
+        lang=lang_param,
+        vad_filter=vad,
+        initial_prompt=initial_prompt or None,
+    )
+    if not extractor.available:
+        typer.echo(
+            "❌ Không thể nạp faster-whisper. Vui lòng cài đặt: pip install faster-whisper"
+        )
+        raise typer.Exit(code=1)
+
+    typer.echo(f"Đang bóc tách ASR từ {videos_dir} -> {output_dir} (model={model_size}, lang={lang})...")
+
+    def _progress(done: int, total: int, vid: str, skipped: bool) -> None:
+        status = "Bỏ qua (đã có)" if skipped else "Đã bóc tách"
+        typer.echo(f"[{done}/{total}] {vid}: {status}")
+
+    written = extractor.transcribe_directory(
+        videos_dir=videos_dir,
+        output_dir=output_dir,
+        video_prefix=video_prefix,
+        resume=resume,
+        progress_callback=_progress,
+    )
+    typer.echo(f"✅ Hoàn thành: đã xử lý {len(written)} video transcript tại {output_dir}")
+
+
+@app.command("asr-manifest")
+def asr_manifest(
+    manifest: Path = typer.Option(Path("data/processed/official_manifest.jsonl"), help="File manifest đầu vào"),
+    asr_dir: Path = typer.Option(Path("data/processed/asr"), help="Thư mục chứa các file JSON ASR (<video_id>.json)"),
+    output: Path | None = typer.Option(None, help="File manifest đầu ra. Mặc định ghi đè file manifest đầu vào."),
+    map_keyframes_dir: Path | None = typer.Option(None, help="Thư mục map-keyframes để lấy timestamp chính xác (pts_time). Mặc định auto-detect data/raw/map-keyframes."),
+    time_window: float = typer.Option(1.5, help="Khoảng mở rộng thời gian xung quanh keyframe (giây) để bắt lời thoại."),
+    default_fps: float = typer.Option(25.0, help="FPS mặc định để tính thời gian nếu không có map-keyframes CSV."),
+    video_prefix: str = typer.Option("", help="Tiền tố video để lọc (vd: L21). Để trống = tất cả video."),
+    resume: bool = typer.Option(False, help="Bỏ qua các frame đã có cờ asr_done=True."),
+) -> None:
+    """Ánh xạ lời thoại ASR theo mốc thời gian vào từng keyframe trong file manifest."""
+    from aic2026.ingestion.asr_manifest import enrich_manifest_with_asr
+
+    map_dir = map_keyframes_dir
+    if map_dir is None:
+        cand = Path("data/raw/map-keyframes")
+        if cand.exists():
+            map_dir = cand
+
+    target = output or manifest
+    typer.echo(f"Đang ánh xạ ASR từ {asr_dir} vào manifest {manifest} -> {target}...")
+
+    def _progress(done: int, total: int, enriched: int) -> None:
+        typer.echo(f"  Tiến độ: {done:,}/{total:,} records (đã gắn ASR cho {enriched:,} frames)...")
+
+    written, enriched = enrich_manifest_with_asr(
+        manifest_path=manifest,
+        asr_dir=asr_dir,
+        output_path=target,
+        map_keyframes_dir=map_dir,
+        time_window=time_window,
+        default_fps=default_fps,
+        video_prefix=video_prefix,
+        resume=resume,
+        progress_callback=_progress,
+    )
+    typer.echo(f"✅ Hoàn thành: {enriched:,}/{written:,} records đã được bổ sung ASR text vào {target}")
+
+
 @app.command("agent-query")
 def agent_query(
     query: Path = typer.Option(..., help="JSON file matching the Query schema"),

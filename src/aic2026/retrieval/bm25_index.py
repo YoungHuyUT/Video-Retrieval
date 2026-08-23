@@ -42,6 +42,8 @@ def _record_tokens(
     Tokenizer giữ nguyên unicode để match cả query tiếng Việt lẫn tiếng Anh.
     """
     parts: list[str] = list(record.object_labels)
+    if getattr(record, "asr_text", None):
+        parts.extend(record.asr_text)
     if video_meta_text:
         parts.append(video_meta_text)
     return _tokenize(" ".join(parts))
@@ -116,6 +118,12 @@ class BM25Index:
             return
         # BM25Okapi handles individual empty token lists gracefully (scores them 0)
         self._bm25 = BM25Okapi(corpus)
+        # Ensure positive IDF floor so terms matching in small test corpora or
+        # 50% frequency documents still yield positive scores (> 0).
+        if hasattr(self._bm25, "idf") and isinstance(self._bm25.idf, dict):
+            for word, val in self._bm25.idf.items():
+                if val <= 0:
+                    self._bm25.idf[word] = 0.01
         self._size = len(corpus)
         self._empty = False
 

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .asr_manifest import enrich_manifest_with_asr
 from .manifest import build_manifest, load_manifest
 
-__all__ = ["build_manifest", "load_manifest", "resolve_feature_sources"]
+__all__ = ["build_manifest", "enrich_manifest_with_asr", "load_manifest", "resolve_feature_sources"]
 
 # Đường dẫn mặc định do `prepare-official` sinh ra từ CLIP features chính thức của
 # BTC (vector có sẵn, không encode lại keyframe). Ưu tiên dùng cặp này khi tồn tại.

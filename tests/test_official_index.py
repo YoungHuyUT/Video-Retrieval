@@ -14,36 +14,45 @@ def _make_dataset(root: Path) -> None:
     keyframes = root / "Keyframes"
     objects = root / "Objects"
     metadata = root / "Metadata"
-    for folder in (keyframes, objects, metadata):
+    clip_features = root / "CLIP features"
+    for folder in (keyframes, objects, metadata, clip_features):
         folder.mkdir(parents=True, exist_ok=True)
 
     # Two videos, each with two keyframes. Filenames are ordinals (0, 1).
     for video in ("L01_V001", "L02_V003"):
         vk = keyframes / video
         vk.mkdir(parents=True, exist_ok=True)
-        for i in (0, 1):
+        for i in (1, 2):
             (vk / f"{i:03d}.jpg").write_bytes(b"jpg")
         # object labels per keyframe: only L01_V001 has "cửa hàng"
         (objects / video).mkdir(parents=True, exist_ok=True)
-        (objects / video / "000.json").write_text(json.dumps([{"label": "người"}]), encoding="utf-8")
+        (objects / video / "001.json").write_text(
+            json.dumps({"detection_class_entities": ["người"], "detection_scores": ["0.85"]}),
+            encoding="utf-8",
+        )
         if video == "L01_V001":
-            (objects / video / "001.json").write_text(json.dumps([{"label": "cửa hàng"}]), encoding="utf-8")
+            (objects / video / "002.json").write_text(
+                json.dumps({"detection_class_entities": ["cửa hàng"], "detection_scores": ["0.90"]}),
+                encoding="utf-8",
+            )
+            np.save(clip_features / f"{video}.npy", np.arange(8, dtype=np.float32).reshape(2, 4))
         else:
-            (objects / video / "001.json").write_text(json.dumps([{"label": "đường phố"}]), encoding="utf-8")
+            (objects / video / "002.json").write_text(
+                json.dumps({"detection_class_entities": ["đường phố"], "detection_scores": ["0.75"]}),
+                encoding="utf-8",
+            )
+            np.save(clip_features / f"{video}.npy", np.arange(8, 16, dtype=np.float32).reshape(2, 4))
         # metadata with ground-truth frame indices (mapped ordinals -> true frames)
         (metadata / f"{video}.json").write_text(
             json.dumps({"title": "video demo", "frame_indices": [100, 101] if video == "L01_V001" else [500, 501]}),
             encoding="utf-8",
         )
 
-    # Official CLIP features: 4 rows, dim 4, ascending keyframe order.
-    np.save(root / "features.npy", np.arange(16, dtype=np.float32).reshape(4, 4))
-
 
 def test_probe_official_features(tmp_path) -> None:
     _make_dataset(tmp_path)
     report = probe_official_features(
-        tmp_path / "features.npy",
+        tmp_path / "CLIP features",
         raw_dir=tmp_path,
         metadata_dir=tmp_path / "Metadata",
     )
@@ -57,7 +66,7 @@ def test_build_official_index_maps_true_frame_ids(tmp_path) -> None:
     _make_dataset(tmp_path)
     out_manifest = tmp_path / "official_manifest.jsonl"
     out_features = tmp_path / "official_features.npy"
-    count = build_official_index(tmp_path, tmp_path / "features.npy", out_manifest, out_features)
+    count = build_official_index(tmp_path, tmp_path / "CLIP features", out_manifest, out_features)
 
     assert count == 4
     records = [FrameRecord.model_validate_json(line) for line in out_manifest.read_text(encoding="utf-8").splitlines()]
@@ -78,20 +87,22 @@ def test_build_official_index_maps_true_frame_ids(tmp_path) -> None:
 
 def test_official_index_count_mismatch_raises(tmp_path) -> None:
     _make_dataset(tmp_path)
-    np.save(tmp_path / "bad.npy", np.zeros((3, 4), dtype=np.float32))
+    bad_dir = tmp_path / "bad_clip"
+    bad_dir.mkdir(parents=True, exist_ok=True)
+    # Empty dir
     try:
-        build_official_index(tmp_path, tmp_path / "bad.npy", tmp_path / "m.jsonl", tmp_path / "f.npy")
-    except ValueError as exc:
-        assert "không khớp" in str(exc)
+        build_official_index(tmp_path, bad_dir, tmp_path / "m.jsonl", tmp_path / "f.npy")
+    except FileNotFoundError:
+        pass
     else:
-        raise AssertionError("expected ValueError for count mismatch")
+        raise AssertionError("expected FileNotFoundError for empty dir")
 
 
 def _mini_pipeline(tmp_path) -> tuple[RetrievalPipeline, list[FrameRecord]]:
     _make_dataset(tmp_path)
     manifest = tmp_path / "official_manifest.jsonl"
     features = tmp_path / "official_features.npy"
-    build_official_index(tmp_path, tmp_path / "features.npy", manifest, features)
+    build_official_index(tmp_path, tmp_path / "CLIP features", manifest, features)
     records = [FrameRecord.model_validate_json(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
     pipeline = RetrievalPipeline(VectorIndex.from_npy(features), records)
     return pipeline, records

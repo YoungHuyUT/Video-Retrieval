@@ -33,7 +33,7 @@ _VI_RE = re.compile(
 )
 
 # Placeholder thay thế tạm thời cho đoạn trong ngoặc, yêu cầu LLM giữ nguyên.
-_KEEP_RE = re.compile(r"<<<KEEP_(\d+)>>>")
+_KEEP_RE = re.compile(r"<<<KEEP_(\d+)>>>", re.IGNORECASE)
 
 
 class Translation(BaseModel):
@@ -237,24 +237,34 @@ def offline_translate(text: str) -> str:
     stripped = _strip_diacritics(remainder)
     lowered = stripped.lower()
 
-    # 1) Thay cụm nhiều từ trước (chuỗi dài hơn ưu tiên).
+    # 1) Thay cụm nhiều từ trước bằng placeholder tạm để không bị step 2 dịch đè.
+    phrase_placeholders: list[tuple[str, str]] = []
     phrase_replaced = False
     for phrase, en in _PHRASE_TABLE:
         if phrase in lowered:
             phrase_replaced = True
-            lowered = lowered.replace(phrase, " " + en + " ")
+            placeholder = f"___phrase_{len(phrase_placeholders)}___"
+            phrase_placeholders.append((placeholder, en))
+            lowered = lowered.replace(phrase, f" {placeholder} ")
 
     # 2) Thay từng token (lookup theo dạng đã bỏ dấu). Token không có trong
     #    từ điển tiếng Việt được giữ nguyên (tiếng Anh).
     out = []
     seen_vietnamese = False
     for tok in lowered.split():
+        if tok.startswith("___phrase_") and tok.endswith("___"):
+            out.append(tok)
+            continue
         key = _strip_diacritics(tok)
         en = _VN_EN_TOKENS.get(key)
         if en is not None:
             seen_vietnamese = True
-        out.append(en if en is not None else tok)
+            out.append(en)
+        else:
+            out.append(tok)
     translated = " ".join(out).strip()
+    for placeholder, en in phrase_placeholders:
+        translated = translated.replace(placeholder, en)
 
     # Nếu không có token tiếng Việt nào được dịch thì input vốn đã là tiếng Anh
     # (hoặc UNKNOWN-token thuần) — trả về nguyên văn, giữ nguyên hoa/thường và dấu

@@ -19,6 +19,7 @@ dependencies = [
 retrieval = ["faiss-cpu>=1.8", "chromadb>=0.5"]
 models = ["torch>=2.3", "open-clip-torch>=2.24", "transformers>=4.49", "qwen-vl-utils>=0.0.8"]
 video = ["opencv-python-headless>=4.10", "pillow>=10.0"]
+asr = ["faster-whisper>=1.0.0"]
 agent = []
 dev = ["pytest>=8.2", "ruff>=0.6"]
 

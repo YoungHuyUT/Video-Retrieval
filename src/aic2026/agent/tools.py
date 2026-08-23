@@ -340,7 +340,7 @@ class RetrievalTools:
         # (b) the VLM only answers frames from the strongest videos instead of a
         # raw pool of hundreds. TRAKE keeps the raw pool (multiple frames per
         # video are meaningful there and it has its own alignment stage).
-        if task_type in ("kis", "qa"):
+        if task_type == "kis":
             top_videos = self.coarse_top_k if self.coarse_top_k and self.coarse_top_k > 0 else None
             candidates = self.pipeline.video_level_rerank(
                 candidates,

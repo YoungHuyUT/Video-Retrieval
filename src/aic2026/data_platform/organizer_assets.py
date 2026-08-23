@@ -41,25 +41,32 @@ def _folder_with_fallback(root: Path, expected: str, fallback_roots: tuple[Path,
 def inspect_official_assets(raw_dir: Path) -> OrganizerAssets:
     raw_dir = Path(raw_dir)
     processed_root = None
-    if raw_dir.name.casefold() != "processed":
+    extracted_root = None
+    if raw_dir.name.casefold() not in ("processed", "extracted"):
         processed_root = (raw_dir.parent / "processed") if raw_dir.parent.exists() else None
-    clip_root = _folder_with_fallback(raw_dir, "CLIP features", (processed_root,)) or _folder_with_fallback(raw_dir, "CLIP_features", (processed_root,))
+        extracted_root = (raw_dir.parent / "extracted") if raw_dir.parent.exists() else None
+    fallbacks = tuple(r for r in (processed_root, extracted_root) if r is not None)
+    clip_root = (
+        _folder_with_fallback(raw_dir, "CLIP features", fallbacks)
+        or _folder_with_fallback(raw_dir, "CLIP_features", fallbacks)
+        or _folder_with_fallback(raw_dir, "clip_features", fallbacks)
+    )
     features = tuple(sorted((clip_root or raw_dir).rglob("*.npy")))
     archives = tuple(sorted(path for path in raw_dir.rglob("*.zip") if path.name.casefold().startswith(("clip-features", "map-keyframes", "media-info", "objects"))))
     # map-keyframes CSV: ưu tiên thư mục được giải nén support (data/raw/map-keyframes.../map-keyframes)
     # hoặc data/downloads, fallback tìm bất kỳ thư mục con nào mang tên "map-keyframes".
     map_root = (
-        _folder_with_fallback(raw_dir.parent, "map-keyframes-aic25-b1", (raw_dir,))
-        or _folder_with_fallback(raw_dir, "map-keyframes-aic25-b1")
-        or _folder_with_fallback(raw_dir, "map-keyframes")
+        _folder_with_fallback(raw_dir.parent, "map-keyframes-aic25-b1", (raw_dir, *fallbacks))
+        or _folder_with_fallback(raw_dir, "map-keyframes-aic25-b1", fallbacks)
+        or _folder_with_fallback(raw_dir, "map-keyframes", fallbacks)
     )
 
     return OrganizerAssets(
-        videos=_folder_with_fallback(raw_dir, "Videos", (processed_root,)),
-        keyframes=_folder_with_fallback(raw_dir, "Keyframes", (processed_root,)),
-        objects=_folder_with_fallback(raw_dir, "Objects", (processed_root,)),
+        videos=_folder_with_fallback(raw_dir, "Videos", fallbacks),
+        keyframes=_folder_with_fallback(raw_dir, "Keyframes", fallbacks),
+        objects=_folder_with_fallback(raw_dir, "Objects", fallbacks),
         clip_features=features,
-        metadata=_folder_with_fallback(raw_dir, "Metadata", (processed_root,)),
+        metadata=_folder_with_fallback(raw_dir, "Metadata", fallbacks),
         map_keyframes=map_root,
         support_archives=archives,
     )

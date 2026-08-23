@@ -134,12 +134,24 @@ def probe_official_features(
     be reverse-engineered before `build_official_index` is called.
     """
     features_path = Path(features_path)
-    vectors = np.load(features_path, mmap_mode="r")
-    result: dict = {
-        "features_path": str(features_path),
-        "dim": int(vectors.shape[1]),
-        "count": int(vectors.shape[0]),
-    }
+    if features_path.is_dir():
+        npy_files = sorted(features_path.rglob("*.npy"))
+        if not npy_files:
+            raise FileNotFoundError(f"No .npy files found in {features_path}")
+        total_count = sum(int(np.load(f, mmap_mode="r").shape[0]) for f in npy_files)
+        dim = int(np.load(npy_files[0], mmap_mode="r").shape[1])
+        result: dict = {
+            "features_path": str(features_path),
+            "dim": dim,
+            "count": total_count,
+        }
+    else:
+        vectors = np.load(features_path, mmap_mode="r")
+        result: dict = {
+            "features_path": str(features_path),
+            "dim": int(vectors.shape[1]),
+            "count": int(vectors.shape[0]),
+        }
 
     per_video: dict[str, dict] = {}
     manifest_path = Path(manifest_path) if manifest_path else None
@@ -374,7 +386,7 @@ def build_official_index(
                     # object_labels only — video-level text moved to video_metadata.jsonl
                     # (see _emit_video_metadata below) to avoid per-frame duplication.
                     object_labels=[label for label in labels if label],
-                    object_path=object_path,
+                    object_path=str(object_path.as_posix()) if object_path is not None else None,
                     metadata_path=vmeta.metadata_path,
                 )
                 mf.write(rec.model_dump_json() + "\n")

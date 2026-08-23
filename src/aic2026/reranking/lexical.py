@@ -571,9 +571,10 @@ def rerank_with_metadata(
             record = records.get(item.vector_id)
             if record is not None:
                 # Aggregate all metadata text to search: object_labels (EN entity)
-                # + metadata_keywords (VN keyword tóm tắt video). title/description
-                # đã bỏ (dư thừa — keywords đã summarize).
+                # + metadata_keywords (VN keyword tóm tắt video) + asr_text (lời thoại).
                 parts: list[str] = list(record.object_labels or [])
+                if getattr(record, "asr_text", None):
+                    parts.extend(record.asr_text)
                 if record.metadata_keywords:
                     parts.extend(record.metadata_keywords)
                 haystack = _fold_accents(" ".join(parts))

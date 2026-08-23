@@ -283,6 +283,19 @@ def load_keyframe_lookup(manifest_path: str) -> dict[tuple[str, int], str]:
     return {(record.video_id, record.frame_id): record.keyframe_path for record in records}
 
 
+@st.cache_data(show_spinner=False)
+def load_asr_lookup(manifest_path: str) -> dict[tuple[str, int], list[str]]:
+    try:
+        records = load_manifest(Path(manifest_path))
+        return {
+            (record.video_id, record.frame_id): record.asr_text
+            for record in records
+            if getattr(record, "asr_text", None)
+        }
+    except Exception:
+        return {}
+
+
 def resolve_keyframe_path(stored_path: str, root: Path) -> Path:
     path = Path(stored_path)
     if path.is_absolute() or path.exists():
@@ -365,6 +378,8 @@ def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
     # nonce thay đổi mỗi query mới → key checkbox "sel_{nonce}_{idx}" luôn mới,
     # không nhớ tick của query trước (reset cứng).
     nonce = int(st.session_state.get("_query_nonce", 0))
+    manifest_path = st.session_state.get("manifest_path")
+    asr_lookup = load_asr_lookup(manifest_path) if manifest_path else {}
     st.subheader(f"Gallery ({len(visible)} ảnh)")
     grid = st.columns(5)
     for pos, (idx, item) in enumerate(visible):
@@ -383,11 +398,22 @@ def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
             if query.type == "qa":
                 ans = item.answer or "⏳ đang phân tích..."
                 answer_html = f'<div class="card-answer">Đáp: {html.escape(str(ans))}</div>'
+            asr_snippets = asr_lookup.get((item.video_id, item.frame_id), [])
+            asr_html = ""
+            if asr_snippets:
+                joined_asr = " ".join(asr_snippets)
+                short_asr = (joined_asr[:65] + "...") if len(joined_asr) > 65 else joined_asr
+                asr_html = (
+                    f'<div style="font-size:0.75rem; color:#3730a3; background:#e0e7ff; '
+                    f'border-radius:4px; padding:2px 4px; margin-top:3px; line-height:1.2;" '
+                    f'title="{html.escape(joined_asr)}">🗣️ {html.escape(short_asr)}</div>'
+                )
             st.markdown(
                 f'<div class="card-meta">'
                 f'<span class="card-rank">#{idx + 1}</span> '
                 f'<span class="card-video">{html.escape(item.video_id)}</span><br>'
                 f"frame {item.frame_id} · score {item.score:.3f}"
+                f"{asr_html}"
                 f"{answer_html}</div>",
                 unsafe_allow_html=True,
             )

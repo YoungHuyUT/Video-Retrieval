@@ -84,8 +84,13 @@ def refine_trake_candidates(
     for rank, candidate in enumerate(candidates):
         if rank >= top_videos or not candidate.event_frames:
             refined.append(candidate)
-            continue
         video_path = video_root / f"{candidate.video_id}.mp4"
+        if not video_path.exists():
+            for alt_root in (Path("data/extracted/Videos"), Path("data/raw/Videos"), Path("D:/bachkhoa/ai_challenge/data/extracted/Videos")):
+                alt_path = alt_root / f"{candidate.video_id}.mp4"
+                if alt_path.exists():
+                    video_path = alt_path
+                    break
         capture = cv2.VideoCapture(str(video_path))
         if not capture.isOpened():
             capture.release()

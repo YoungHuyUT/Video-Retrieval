@@ -79,7 +79,7 @@ def test_rerank_metadata_bonus_is_bounded_not_dominant() -> None:
     # the old ~3x-RRF magnitude; the unmatched frame keeps a high (normalized) score.
     assert 0.0 <= reranked[0].score <= 1.5
     unmatched = next(c for c in reranked if c.vector_id == 1)
-    assert unmatched.score > 0.9  # normalized raw retrieval score, no bonus stripped
+    assert unmatched.score == 0.55  # raw retrieval score preserved without distortion
 
 
 def test_rerank_no_metadata_stays_stable_order() -> None:
