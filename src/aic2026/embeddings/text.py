@@ -3,9 +3,24 @@ from __future__ import annotations
 import numpy as np
 
 
+_DEFAULT_PROMPT_TEMPLATES = (
+    "{}",
+    "a photo of {}",
+    "a video frame showing {}",
+    "a scene of {}",
+    "a clear view of {}",
+)
+
+
 class OpenCLIPTextEmbedder:
-    """Text encoder matching CLIP ViT-B/32 features when the checkpoint is the same."""
-    def __init__(self, model_name: str = "ViT-B-32", pretrained: str = "openai", device: str | None = None):
+    """Text encoder matching CLIP features with multi-template prompt ensembling."""
+    def __init__(
+        self,
+        model_name: str = "ViT-B-32",
+        pretrained: str = "openai",
+        device: str | None = None,
+        use_ensemble: bool = True,
+    ):
         try:
             import open_clip
             import torch
@@ -14,6 +29,7 @@ class OpenCLIPTextEmbedder:
         self.model_name = model_name
         self.pretrained = pretrained
         self.torch = torch
+        self.use_ensemble = use_ensemble
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
             model_name, pretrained=pretrained, device=self.device
@@ -21,11 +37,25 @@ class OpenCLIPTextEmbedder:
         self.tokenizer = open_clip.get_tokenizer(model_name)
         self.model.eval()
 
-    def encode(self, text: str) -> np.ndarray:
+    def encode(self, text: str, ensemble: bool | None = None) -> np.ndarray:
+        """Encode text query into normalized CLIP feature vector using prompt ensembling."""
+        clean_text = (text or "").strip()
+        if not clean_text:
+            clean_text = "a photo"
+        do_ensemble = self.use_ensemble if ensemble is None else ensemble
         with self.torch.no_grad():
-            features = self.model.encode_text(self.tokenizer([text]).to(self.device))
+            if do_ensemble:
+                prompts = [tmpl.format(clean_text) for tmpl in _DEFAULT_PROMPT_TEMPLATES]
+                tokens = self.tokenizer(prompts).to(self.device)
+                features = self.model.encode_text(tokens)
+                features = features / features.norm(dim=-1, keepdim=True)
+                mean_feat = features.mean(dim=0, keepdim=True)
+                mean_feat = mean_feat / mean_feat.norm(dim=-1, keepdim=True)
+                return mean_feat[0].detach().cpu().float().numpy()
+            tokens = self.tokenizer([clean_text]).to(self.device)
+            features = self.model.encode_text(tokens)
             features = features / features.norm(dim=-1, keepdim=True)
-        return features[0].detach().cpu().float().numpy()
+            return features[0].detach().cpu().float().numpy()
 
     def encode_images(self, images: list[object], batch_size: int = 32) -> np.ndarray:
         """Encode RGB PIL images with the same CLIP checkpoint as ``encode``."""

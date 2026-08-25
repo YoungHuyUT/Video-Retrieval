@@ -422,3 +422,18 @@ def test_openclip_reload_after_unload_keeps_encode_callable() -> None:
     after = enc.encode("a person presenting")
     assert after.shape[0] == 512
     assert not (before == after).all()
+
+
+def test_openclip_prompt_ensembling_normalized() -> None:
+    """Prompt ensembling must return unit-norm vectors for both single and ensemble modes."""
+    from aic2026.embeddings import OpenCLIPTextEmbedder
+
+    enc = OpenCLIPTextEmbedder(use_ensemble=True)
+    v_ens = enc.encode("a red car on the highway", ensemble=True)
+    assert np.isclose(np.linalg.norm(v_ens), 1.0, atol=1e-5)
+
+    v_single = enc.encode("a red car on the highway", ensemble=False)
+    assert np.isclose(np.linalg.norm(v_single), 1.0, atol=1e-5)
+    # Ensemble should be closely aligned with single, but smooth out template variance
+    cos_sim = float(v_ens @ v_single)
+    assert 0.85 < cos_sim <= 1.0001
