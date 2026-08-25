@@ -108,10 +108,11 @@ def build_derived_index_input(
     features_dir: Path = typer.Option(Path("data/processed/clip_features"), help="Thư mục embedding đã sinh ra ở processed"),
     manifest: Path = typer.Option(Path("data/processed/derived_manifest.jsonl"), help="Manifest output ở processed"),
     features: Path = typer.Option(Path("data/processed/derived_features.npy"), help="Feature index output ở processed"),
+    map_keyframes_dir: Path | None = typer.Option(None, help="Thư mục map-keyframes CSV để gắn đúng frame_idx video gốc"),
 ) -> None:
     """Gộp embedding frame đã giữ thành manifest và `.npy` dùng trực tiếp cho FAISS/retrieval."""
     from aic2026.data_platform import build_derived_artifacts
-    count = build_derived_artifacts(keyframes_dir, features_dir, manifest, features)
+    count = build_derived_artifacts(keyframes_dir, features_dir, manifest, features, map_keyframes_dir=map_keyframes_dir)
     typer.echo(f"Wrote {count} retained frame records to {manifest} and {features}")
 
 @app.command("embed-keyframes")

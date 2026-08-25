@@ -50,15 +50,26 @@ def inspect_official_assets(raw_dir: Path) -> OrganizerAssets:
         _folder_with_fallback(raw_dir, "CLIP features", fallbacks)
         or _folder_with_fallback(raw_dir, "CLIP_features", fallbacks)
         or _folder_with_fallback(raw_dir, "clip_features", fallbacks)
+        or _folder_with_fallback(raw_dir, "clip-features-32", fallbacks)
+        or _folder_with_fallback(raw_dir, "clip-features", fallbacks)
     )
-    features = tuple(sorted((clip_root or raw_dir).rglob("*.npy")))
-    archives = tuple(sorted(path for path in raw_dir.rglob("*.zip") if path.name.casefold().startswith(("clip-features", "map-keyframes", "media-info", "objects"))))
+    if clip_root is not None and clip_root.exists():
+        features = tuple(sorted(clip_root.glob("*.npy")))
+    else:
+        features = tuple(sorted(raw_dir.glob("*.npy")))
+    zip_roots = (raw_dir, *fallbacks, raw_dir.parent if raw_dir.parent.exists() else None)
+    archives_list = []
+    for zr in zip_roots:
+        if zr and zr.exists():
+            archives_list.extend(path for path in zr.glob("*.zip") if path.name.casefold().startswith(("clip-features", "map-keyframes", "media-info", "objects")))
+    archives = tuple(sorted(set(archives_list)))
     # map-keyframes CSV: ưu tiên thư mục được giải nén support (data/raw/map-keyframes.../map-keyframes)
     # hoặc data/downloads, fallback tìm bất kỳ thư mục con nào mang tên "map-keyframes".
     map_root = (
         _folder_with_fallback(raw_dir.parent, "map-keyframes-aic25-b1", (raw_dir, *fallbacks))
         or _folder_with_fallback(raw_dir, "map-keyframes-aic25-b1", fallbacks)
         or _folder_with_fallback(raw_dir, "map-keyframes", fallbacks)
+        or _folder_with_fallback(raw_dir.parent, "map-keyframes", fallbacks)
     )
 
     return OrganizerAssets(
@@ -66,7 +77,12 @@ def inspect_official_assets(raw_dir: Path) -> OrganizerAssets:
         keyframes=_folder_with_fallback(raw_dir, "Keyframes", fallbacks),
         objects=_folder_with_fallback(raw_dir, "Objects", fallbacks),
         clip_features=features,
-        metadata=_folder_with_fallback(raw_dir, "Metadata", fallbacks),
+        metadata=(
+            _folder_with_fallback(raw_dir, "Metadata", fallbacks)
+            or _folder_with_fallback(raw_dir, "media-info", fallbacks)
+            or _folder_with_fallback(raw_dir, "media_info", fallbacks)
+            or _folder_with_fallback(raw_dir, "media-info-aic25-b1", fallbacks)
+        ),
         map_keyframes=map_root,
         support_archives=archives,
     )

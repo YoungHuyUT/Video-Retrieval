@@ -276,6 +276,7 @@ def build_derived_artifacts(
     records: list[FrameRecord] = []
     all_features: list[np.ndarray] = []
     vector_id = 0
+    expected_dim: int | None = None
     for archive_path in sorted(features_root.glob("*.npz")):
         video_id = archive_path.stem
         if selected_video_ids and video_id not in selected_video_ids:
@@ -292,6 +293,15 @@ def build_derived_artifacts(
             continue
         if len(frame_ids) != len(features):
             raise ValueError(f"{archive_path}: frame_ids and features have different sizes")
+        if len(features) > 0 and features.ndim == 2:
+            dim = features.shape[1]
+            if expected_dim is None:
+                expected_dim = dim
+            elif dim != expected_dim:
+                raise ValueError(
+                    f"File {archive_path.name} có chiều vector là {dim}, khác với chiều chuẩn {expected_dim}. "
+                    f"Hãy xóa hoặc re-encode lại file này."
+                )
 
         csv_frames = _load_csv_frame_indices(map_keyframes_dir, video_id)
 
@@ -321,5 +331,5 @@ def build_derived_artifacts(
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     features_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text("\n".join(record.model_dump_json() for record in records) + "\n", encoding="utf-8")
-    np.save(features_path, np.asarray(all_features, dtype=np.float32))
+    np.save(features_path, np.vstack(all_features).astype(np.float32))
     return len(records)
