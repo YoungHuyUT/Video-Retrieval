@@ -37,8 +37,14 @@ class OpenCLIPTextEmbedder:
         self.tokenizer = open_clip.get_tokenizer(model_name)
         self.model.eval()
 
-    def encode(self, text: str, ensemble: bool | None = None) -> np.ndarray:
-        """Encode text query into normalized CLIP feature vector using prompt ensembling."""
+    def encode(
+        self,
+        text: str,
+        ensemble: bool | None = None,
+        negative_prompt: str | None = None,
+        neg_weight: float = 0.15,
+    ) -> np.ndarray:
+        """Encode text query into normalized CLIP feature vector with prompt ensembling and negative suppression."""
         clean_text = (text or "").strip()
         if not clean_text:
             clean_text = "a photo"
@@ -50,12 +56,21 @@ class OpenCLIPTextEmbedder:
                 features = self.model.encode_text(tokens)
                 features = features / features.norm(dim=-1, keepdim=True)
                 mean_feat = features.mean(dim=0, keepdim=True)
-                mean_feat = mean_feat / mean_feat.norm(dim=-1, keepdim=True)
-                return mean_feat[0].detach().cpu().float().numpy()
-            tokens = self.tokenizer([clean_text]).to(self.device)
-            features = self.model.encode_text(tokens)
-            features = features / features.norm(dim=-1, keepdim=True)
-            return features[0].detach().cpu().float().numpy()
+                pos_vec = mean_feat / mean_feat.norm(dim=-1, keepdim=True)
+            else:
+                tokens = self.tokenizer([clean_text]).to(self.device)
+                features = self.model.encode_text(tokens)
+                pos_vec = features / features.norm(dim=-1, keepdim=True)
+
+            if negative_prompt and negative_prompt.strip():
+                neg_tokens = self.tokenizer([negative_prompt.strip()]).to(self.device)
+                neg_features = self.model.encode_text(neg_tokens)
+                neg_vec = neg_features / neg_features.norm(dim=-1, keepdim=True)
+                combined = pos_vec - neg_weight * neg_vec
+                combined = combined / combined.norm(dim=-1, keepdim=True)
+                return combined[0].detach().cpu().float().numpy()
+
+            return pos_vec[0].detach().cpu().float().numpy()
 
     def encode_images(self, images: list[object], batch_size: int = 32) -> np.ndarray:
         """Encode RGB PIL images with the same CLIP checkpoint as ``encode``."""

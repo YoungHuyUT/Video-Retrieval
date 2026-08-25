@@ -106,3 +106,24 @@ def test_dp_rejects_invalid_values() -> None:
         align_events_dp(
             similarity_matrix=similarity,
         )
+
+
+def test_temporal_smoothing_boosts_adjacent_frames() -> None:
+    from aic2026.models import Candidate
+    from aic2026.temporal import apply_temporal_smoothing
+
+    # V1 has a cluster of 3 consecutive matching frames (10, 11, 12).
+    # V2 has an isolated outlier frame (20).
+    cands = [
+        Candidate(video_id="V1", frame_id=10, score=0.80, vector_id=1),
+        Candidate(video_id="V1", frame_id=11, score=0.85, vector_id=2),
+        Candidate(video_id="V1", frame_id=12, score=0.82, vector_id=3),
+        Candidate(video_id="V2", frame_id=20, score=0.87, vector_id=4),
+    ]
+
+    smoothed = apply_temporal_smoothing(cands, sigma=1.5, window=3, weight=0.30)
+    # The middle frame in the continuous shot (V1, frame 11) gets a strong neighborhood bonus
+    # and should be promoted to rank 0 over the isolated outlier V2.
+    assert smoothed[0].video_id == "V1"
+    assert smoothed[0].frame_id == 11
+    assert smoothed[0].score > 0.85

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Callable
 import numpy as np
 
 from aic2026.models import Candidate, FrameRecord
-from aic2026.temporal import align_events_dp
+from aic2026.temporal import align_events_dp, apply_temporal_smoothing
 
 from .index import VectorIndex
 from .video_metadata import VideoMetadataStore
@@ -482,6 +482,9 @@ class RetrievalPipeline:
             frames_per_video = self.frames_per_video
         if frames_per_video <= 0:
             raise ValueError("frames_per_video must be greater than zero")
+
+        # 0. Apply Temporal Gaussian Smoothing across neighboring keyframes within each shot
+        candidates = apply_temporal_smoothing(candidates, sigma=1.5, window=3, weight=0.15)
 
         by_video: dict[str, list[Candidate]] = defaultdict(list)
         for cand in candidates:

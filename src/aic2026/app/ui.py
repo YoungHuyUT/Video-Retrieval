@@ -330,6 +330,25 @@ def load_asr_lookup(manifest_path: str) -> dict[tuple[str, int], list[str]]:
         return {}
 
 
+@st.cache_data(show_spinner=False)
+def load_video_keyframes(manifest_path: str | None) -> dict[str, list[int]]:
+    by_video: dict[str, list[int]] = defaultdict(list)
+    if not manifest_path or not Path(manifest_path).exists():
+        return {}
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                by_video[rec["video_id"]].append(int(rec["frame_id"]))
+        for vid in by_video:
+            by_video[vid].sort()
+    except Exception:
+        pass
+    return dict(by_video)
+
+
 def resolve_keyframe_path(stored_path: str, root: Path) -> Path:
     path = Path(stored_path)
     if path.exists():
@@ -447,6 +466,7 @@ def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
     nonce = int(st.session_state.get("_query_nonce", 0))
     manifest_path = st.session_state.get("manifest_path")
     asr_lookup = load_asr_lookup(manifest_path) if manifest_path else {}
+    lookup = load_keyframe_lookup(manifest_path) if manifest_path else {}
     st.subheader(f"Gallery ({len(visible)} ảnh)")
     grid = st.columns(5)
     for pos, (idx, item) in enumerate(visible):
@@ -483,6 +503,28 @@ def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
                 f"{answer_html}</div>",
                 unsafe_allow_html=True,
             )
+
+            # Shot timeline context strip popover
+            video_kf_map = load_video_keyframes(manifest_path)
+            all_v_frames = video_kf_map.get(item.video_id, [])
+            if len(all_v_frames) > 1:
+                with st.popover("🎞️ Dải frame lân cận", use_container_width=True):
+                    st.caption(f"**Video:** `{item.video_id}` (đang xem frame `{item.frame_id}`)")
+                    f_idx = all_v_frames.index(item.frame_id) if item.frame_id in all_v_frames else 0
+                    start_i = max(0, f_idx - 3)
+                    end_i = min(len(all_v_frames), f_idx + 4)
+                    strip = all_v_frames[start_i:end_i]
+                    t_cols = st.columns(len(strip))
+                    for c_pos, fid in enumerate(strip):
+                        sp = event_keyframe_file(item.video_id, fid, lookup, root)
+                        with t_cols[c_pos]:
+                            if sp and sp.exists():
+                                st.image(str(sp), use_container_width=True)
+                            else:
+                                st.caption("No img")
+                            is_curr = fid == item.frame_id
+                            st.caption(f"{'👉 ' if is_curr else ''}`{fid}`")
+
             # Checkbox chọn nằm DƯỚI CÙNG, cách xa ảnh (tránh bấm nhầm khi lướt).
             st.checkbox("Chọn", key=f"sel_{nonce}_{idx}", value=(idx in selected), on_change=_toggle, args=(idx, nonce), label_visibility="collapsed")
             st.markdown("</div>", unsafe_allow_html=True)
