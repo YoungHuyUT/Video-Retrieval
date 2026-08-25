@@ -112,15 +112,10 @@ class RetrievalAgent:
         # LLM planner that used to do this). Text inside brackets (…), […],
         # {…}, and quotes is preserved verbatim (e.g. names / sign text).
         #
-        # CHỈ dịch khi ``self.translate=True`` (đã tick ô "Dịch VI→EN" trên UI,
-        # hoặc truyền ``translate_query=True`` từ CLI). Khi tắt, dùng NGUYÊN BẢN
-        # query — đúng semantics của checkbox "Mặc định TẮT — dùng query nguyên
-        # bản". Không dịch ngầm dù chưa tick.
-        #
-        # Khi bật: dịch OFFLINE (từ điển, không cần LLM, không bao giờ lỗi) để
-        # đưa tiếng Việt → tiếng Anh cho CLIP text encoder; nếu có LLM thì dịch
-        # tiếp bằng LLM để sửa lỗi chính tả EN, LLM lỗi tự fallback bản offline.
-        from .translator import translate_query_fields
+        # --- Translate Vietnamese → English (deterministic pipeline dropped the
+        # LLM planner that used to do this). Text inside brackets (…), […],
+        # {…}, and quotes is preserved verbatim (e.g. names / sign text).
+        from .translator import decompose_query_modalities, translate_query_fields
 
         if self.translate:
             use_llm = self.llm is not None
@@ -169,14 +164,15 @@ class RetrievalAgent:
             else:
                 trace = []
         else:
-            # Chưa bật "Dịch VI→EN" → dùng query nguyên bản (chuẩn semantics checkbox).
             trace = []
 
-        # --- Fully deterministic pipeline (no LLM round-trips) -------------
-        # Planner + judge LLM are replaced by retrieval (CLIP + BM25 RRF) and
-        # an algorithmic rerank (metadata bonus + MMR diversity). This is the
-        # fastest, most stable path and is the default for KIS/Q&A.
-        # TRAKE keeps its deterministic event-wise retrieval + DP alignment.
+        # Modality routing & decomposition (Visual / OCR / ASR) — AAAI 2026
+        modality_plan = decompose_query_modalities(
+            query.text,
+            llm=self.llm,
+            use_llm=self.translate and self.llm is not None,
+        )
+
         plan = AgentPlan(
             query_variants=[query.text],
             events=(
@@ -185,9 +181,10 @@ class RetrievalAgent:
                 else []
             ),
             rationale=(
-                "Deterministic plan: no LLM planner. Retrieval uses CLIP + BM25 "
-                "RRF; selection uses algorithmic rerank (metadata bonus + MMR)."
+                f"Adaptive multimodal plan: w_vis={modality_plan.w_vis}, "
+                f"w_ocr={modality_plan.w_ocr}, w_asr={modality_plan.w_asr}. {modality_plan.reason}"
             ),
+            modality=modality_plan,
         )
         trace.append(
             AgentTrace(
@@ -203,12 +200,6 @@ class RetrievalAgent:
                 plan=plan,
             )
 
-            # TRAKE searches the FULL corpus. We do NOT hard-restrict to L26: BTC
-            # event queries are generic and match many splits, so excluding
-            # L21/L22/L25/... would silently zero recall (verified: a generic
-            # "enters room / sits" query returns 0 L26 candidates). Instead we
-            # pass L26 as a soft *preference* so it is nudged up without being
-            # the only allowed split. Override via trake_preferred_prefixes.
             self.tools.video_prefixes = None
             candidates = self.tools.retrieve_trake(
                 events=events,
@@ -240,24 +231,21 @@ class RetrievalAgent:
                 trace=trace,
             )
 
-        # KIS / Q&A: retrieve directly on the (translated) query text.
-        # Multi-query expansion was tried but added a second LLM round-trip
-        # (slower) for marginal recall gain on short, specific BTC queries,
-        # so we keep a single translation + single retrieval for speed.
-        # Both KIS and Q&A search the FULL corpus (no split restriction): KIS is
-        # whole-video retrieval by nature, and Q&A reads OCR'd text that spans
-        # every split. OCR itself is scoped to L25 at build time; retrieval is
-        # not.
+        # KIS / Q&A: retrieve with Adaptive Multimodal Fusion across Visual, OCR, and ASR
         self.tools.video_prefixes = None
         found = self.tools.retrieve(
             query=query.text,
             limit=self.retrieval_pool_size,
             task_type=query.type,
+            modality=modality_plan,
         )
         trace.append(
             AgentTrace(
                 step="retrieve",
-                detail=f"{len(found)} candidates for task={query.type}",
+                detail=(
+                    f"{len(found)} candidates via Adaptive Multimodal Fusion "
+                    f"(vis={modality_plan.w_vis}, ocr={modality_plan.w_ocr}, asr={modality_plan.w_asr})"
+                ),
             )
         )
 

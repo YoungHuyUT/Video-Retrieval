@@ -27,13 +27,20 @@ def _load_keyframe_frame_ids(map_root: Path | None, video_id: str) -> list[int] 
     """Đọc CSV map-keyframes → list frame_idx (frame thật của video) theo thứ tự ordinal.
 
     CSV có cột: n, pts_time, fps, frame_idx. `frame_idx` = frame index gốc trong video,
-    thứ tự hàng = ordinal keyframe (1-based). Đây là nguồn đáng tin cậy hơn metadata
-    JSON (metadata BTC không có frame_indices). Trả về None nếu file CSV không có.
+    thứ tự hàng = ordinal keyframe (1-based). Trả về None nếu file CSV không có.
     """
-    if map_root is None:
-        return None
-    csv_path = map_root / "map-keyframes" / f"{video_id}.csv"
-    if not csv_path.exists():
+    candidates = []
+    if map_root is not None:
+        candidates.extend([
+            map_root / f"{video_id}.csv",
+            map_root / "map-keyframes" / f"{video_id}.csv",
+            map_root.parent / "map-keyframes" / f"{video_id}.csv",
+            map_root.parent / "extracted" / "map-keyframes" / f"{video_id}.csv",
+        ])
+    candidates.append(Path("D:/bachkhoa/ai_challenge/data/extracted/map-keyframes") / f"{video_id}.csv")
+
+    csv_path = next((c for c in candidates if c.exists()), None)
+    if csv_path is None:
         return None
     try:
         with csv_path.open(encoding="utf-8") as fh:
@@ -352,11 +359,11 @@ def build_official_index(
             video_empty = 0  # frame rỗng object trong video này
             for ordinal_index in range(n_frames):
                 ordinal = ordinal_index + 1  # 1-based keyframe ordinal
-                # Use cached frame_indices (from metadata) first, then CSV map, then ordinal
-                if vmeta.frame_indices and ordinal_index < len(vmeta.frame_indices):
-                    frame_id = vmeta.frame_indices[ordinal_index]
-                elif expected and ordinal_index < len(expected):
+                # Ưu tiên CSV map-keyframes (frame_idx chuẩn gốc video)
+                if expected and ordinal_index < len(expected):
                     frame_id = expected[ordinal_index]
+                elif vmeta.frame_indices and ordinal_index < len(vmeta.frame_indices):
+                    frame_id = vmeta.frame_indices[ordinal_index]
                 else:
                     frame_id = ordinal
                 image = image_by_slot.get((video_id, ordinal))

@@ -72,7 +72,14 @@ def _encode_images_in_chunks(encoder: object, images: Iterable[object], batch_si
     return np.vstack(vectors)
 
 
-def embed_existing_keyframes(keyframes_root: Path, features_root: Path, encoder: object, batch_size: int = 4, video_id: str | None = None) -> list[Path]:
+def embed_existing_keyframes(
+    keyframes_root: Path,
+    features_root: Path,
+    encoder: object,
+    batch_size: int = 32,
+    video_id: str | None = None,
+    resume: bool = True,
+) -> list[Path]:
     """Encode existing JPG keyframes on disk into per-video .npz archives."""
     try:
         from PIL import Image
@@ -90,7 +97,14 @@ def embed_existing_keyframes(keyframes_root: Path, features_root: Path, encoder:
     else:
         selected_dirs = [path for path in sorted(keyframes_root.glob("*")) if path.is_dir()]
 
-    for video_dir in selected_dirs:
+    from tqdm import tqdm
+    bar = tqdm(selected_dirs, desc="Encoding keyframes", unit="video")
+    for video_dir in bar:
+        archive_path = features_root / f"{video_dir.name}.npz"
+        if resume and archive_path.exists() and archive_path.stat().st_size > 0:
+            written_paths.append(archive_path)
+            continue
+
         frame_paths = sorted(
             [*video_dir.glob("*.jpg"), *video_dir.glob("*.png")]
         )
@@ -114,9 +128,9 @@ def embed_existing_keyframes(keyframes_root: Path, features_root: Path, encoder:
             continue
 
         vectors = _encode_images_in_chunks(encoder, images, batch_size=batch_size)
-        archive_path = features_root / f"{video_dir.name}.npz"
         np.savez_compressed(archive_path, frame_ids=np.asarray(frame_ids, dtype=np.int64), features=np.asarray(vectors, dtype=np.float32))
         written_paths.append(archive_path)
+        bar.set_postfix(video=video_dir.name, frames=len(images))
 
     return written_paths
 
@@ -227,7 +241,35 @@ def _resolve_frame_path(keyframes_root: Path, video_id: str, frame_id: int) -> P
     return None
 
 
-def build_derived_artifacts(keyframes_root: Path, features_root: Path, manifest_path: Path, features_path: Path, video_ids: Iterable[str] | None = None) -> int:
+def _load_csv_frame_indices(map_dir: Path | None, video_id: str) -> list[int] | None:
+    """Load real frame_idx list from map-keyframes CSV."""
+    import csv
+    candidates = []
+    if map_dir:
+        candidates.extend([
+            map_dir / f"{video_id}.csv",
+            map_dir / "map-keyframes" / f"{video_id}.csv",
+        ])
+    candidates.append(Path("D:/bachkhoa/ai_challenge/data/extracted/map-keyframes") / f"{video_id}.csv")
+    p = next((c for c in candidates if c.exists()), None)
+    if not p:
+        return None
+    try:
+        with p.open(encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            return [int(r["frame_idx"]) for r in reader if r.get("frame_idx")]
+    except Exception:
+        return None
+
+
+def build_derived_artifacts(
+    keyframes_root: Path,
+    features_root: Path,
+    manifest_path: Path,
+    features_path: Path,
+    video_ids: Iterable[str] | None = None,
+    map_keyframes_dir: Path | None = None,
+) -> int:
     """Merge per-video retained CLIP archives into one manifest + `.npy` index input."""
     keyframes_root, features_root = Path(keyframes_root), Path(features_root)
     selected_video_ids = set(video_ids or [])
@@ -250,7 +292,10 @@ def build_derived_artifacts(keyframes_root: Path, features_root: Path, manifest_
             continue
         if len(frame_ids) != len(features):
             raise ValueError(f"{archive_path}: frame_ids and features have different sizes")
-        for frame_id, feature in zip(frame_ids, features):
+
+        csv_frames = _load_csv_frame_indices(map_keyframes_dir, video_id)
+
+        for ord_idx, (frame_id, feature) in enumerate(zip(frame_ids, features)):
             image = _resolve_frame_path(keyframes_root, video_id, int(frame_id))
             if image is None or not image.exists():
                 logger.warning(
@@ -259,7 +304,16 @@ def build_derived_artifacts(keyframes_root: Path, features_root: Path, manifest_
                     int(frame_id),
                 )
                 continue
-            records.append(FrameRecord(vector_id=vector_id, clip_feature_index=vector_id, video_id=video_id, frame_id=int(frame_id), keyframe_path=str(image)))
+            real_frame_id = csv_frames[ord_idx] if csv_frames and ord_idx < len(csv_frames) else int(frame_id)
+            records.append(
+                FrameRecord(
+                    vector_id=vector_id,
+                    clip_feature_index=vector_id,
+                    video_id=video_id,
+                    frame_id=real_frame_id,
+                    keyframe_path=str(image),
+                )
+            )
             all_features.append(feature)
             vector_id += 1
     if not records:

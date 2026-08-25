@@ -12,6 +12,9 @@ outputs/
 *.egg-info/
 build/
 dist/
+*.bak
 *.bak.*
+query_*.json
+test_ocr_checkpoint.py
 .DS_Store
 Thumbs.db

@@ -565,6 +565,7 @@ if st.session_state.get("_run_agent"):
                 runtime = {
                     "manifest_path": st.session_state.get("cfg_manifest", "data/processed/official_manifest.jsonl"),
                     "features_path": st.session_state.get("cfg_features", "data/processed/official_features.npy"),
+                    "clip_model": st.session_state.get("cfg_clip_model", "ViT-B-32"),
                     "clip_pretrained": st.session_state.get("cfg_clip", "openai"),
                     "llm_model": st.session_state.get("cfg_llm", "qwen3.5:4b"),
                     "ollama_url": st.session_state.get("cfg_ollama", "http://127.0.0.1:11434"),
@@ -648,7 +649,8 @@ with st.expander("Cấu hình nâng cao"):
     st.text_input("Manifest", "data/processed/official_manifest.jsonl", key="cfg_manifest")
     st.text_input("Feature .npy", "data/processed/official_features.npy", key="cfg_features")
     st.text_input("Root keyframe", "data/processed", key="cfg_root")
-    st.text_input("CLIP pretrained", "openai", key="cfg_clip")
+    st.text_input("CLIP model", "ViT-B-32", key="cfg_clip_model", help="ViT-B-32, ViT-L-14, ViT-L-14-quickgelu, ViT-B-16-SigLIP, ViT-SO400M-14-SigLIP-384")
+    st.text_input("CLIP pretrained", "openai", key="cfg_clip", help="openai, metaclip_fullcc, metaclip_400m, laion2b_s32b_b82k, webli")
     st.text_input("Ollama model", "qwen3.5:4b", key="cfg_llm")
     st.text_input("Ollama URL", "http://127.0.0.1:11434", key="cfg_ollama")
     st.text_input(

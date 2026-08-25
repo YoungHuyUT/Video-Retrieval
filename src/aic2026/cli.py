@@ -120,9 +120,13 @@ def embed_keyframes(
     features_dir: Path = typer.Option(Path("data/processed/clip_features"), help="Thư mục output để ghi .npz/.npy embedding tự tạo (không phải thư mục CLIP features BTC đầu vào)"),
     manifest: Path = typer.Option(Path("data/processed/derived_manifest.jsonl"), help="Manifest output ở processed"),
     features: Path = typer.Option(Path("data/processed/derived_features.npy"), help="Feature index output ở processed"),
-    clip_pretrained: str = typer.Option("openai", help="Checkpoint OpenCLIP: openai (chuẩn BTC) hoặc laion2b_s32b_b79k"),
-    batch_size: int = typer.Option(4, min=1, help="Số ảnh mỗi batch để giảm mức dùng RAM"),
+    clip_model: str = typer.Option("ViT-B-32", help="Mô hình CLIP: ViT-B-32, ViT-L-14, ViT-L-14-quickgelu (MetaCLIP), ViT-B-16-SigLIP, ViT-SO400M-14-SigLIP-384"),
+    clip_pretrained: str = typer.Option("openai", help="Checkpoint: openai, metaclip_fullcc, metaclip_400m, laion2b_s32b_b82k, webli"),
+    device: str = typer.Option("cuda", help="Thiết bị: cuda, cpu, hoặc auto"),
+    batch_size: int = typer.Option(32, min=1, help="Số ảnh mỗi batch để encode trên GPU"),
     video_id: str | None = typer.Option(None, help="Chỉ encode 1 thư mục keyframe, ví dụ L21_V001"),
+    map_keyframes_dir: Path | None = typer.Option(None, help="Thư mục map-keyframes CSV để gắn đúng frame_idx video gốc"),
+    resume: bool = typer.Option(True, help="Bỏ qua các video đã encode xong"),
     with_chroma: bool = typer.Option(False, help="Sau khi build .npy/.manifest, build luôn Chroma collection tại --chroma-dir"),
     chroma_dir: Path = typer.Option(Path("data/indexes/chroma"), help="Thư mục lưu Chroma index (dùng khi --with-chroma)"),
     with_ocr: bool = typer.Option(False, help="Sau khi build manifest, chạy OCR enrich object_labels ngay (cần paddleocr)"),
@@ -134,10 +138,11 @@ def embed_keyframes(
         build_derived_artifacts,
         embed_existing_keyframes,
     )
-    image_encoder = OpenCLIPFrameEncoder(model_name="ViT-B-32", pretrained=clip_pretrained)
+    dev = None if device == "auto" else device
+    image_encoder = OpenCLIPFrameEncoder(model_name=clip_model, pretrained=clip_pretrained, device=dev)
 
-    archives = embed_existing_keyframes(keyframes_dir, features_dir, image_encoder, batch_size=batch_size, video_id=video_id)
-    count = build_derived_artifacts(keyframes_dir, features_dir, manifest, features, video_ids=[video_id] if video_id else None)
+    archives = embed_existing_keyframes(keyframes_dir, features_dir, image_encoder, batch_size=batch_size, video_id=video_id, resume=resume)
+    count = build_derived_artifacts(keyframes_dir, features_dir, manifest, features, video_ids=[video_id] if video_id else None, map_keyframes_dir=map_keyframes_dir)
     typer.echo(f"Created {len(archives)} feature archives under {features_dir}; wrote {count} records to {manifest} and {features}")
 
     if with_ocr:
@@ -771,6 +776,8 @@ def agent_query(
     drop_empty_object_frames: bool = typer.Option(False, help="KIS: loại hẳn frame KHÔNG có vật thể nào (ảnh mờ, không entity đạt ngưỡng 0.4) khi query có hỏi vật thể. Giảm truy xuất đến frame nhiễu. Tắt nếu sợ mất recall."),
     trake_preferred_prefixes: str = typer.Option("", help="Ưu tiên (soft bias, KHÔNG loại trừ) TRAKE vào tiền tố video_id, cách nhau dấu phẩy (vd: L26). KIS/Q&A luôn xét TOÀN BỘ video. Để trống = mặc định ưu tiên L26. Truyền '.' để tắt ưu tiên."),
     translate: bool = typer.Option(False, help="Dịch VI→EN trước khi retrieval (CLIP là tiếng Anh). Mặc định tắt: dùng query nguyên bản."),
+    clip_model: str = typer.Option("ViT-B-32", help="Mô hình CLIP (ViT-B-32, ViT-L-14, ViT-L-14-quickgelu, ViT-B-16-SigLIP, ViT-SO400M-14-SigLIP-384)"),
+    clip_pretrained: str = typer.Option("openai", help="Checkpoint (openai, metaclip_fullcc, metaclip_400m, laion2b_s32b_b82k, webli)"),
     output: Path | None = typer.Option(None),
 ) -> None:
     """Run the bounded local-LLM agent and save auditable candidates/trace."""
@@ -781,7 +788,7 @@ def agent_query(
     from aic2026.retrieval import RetrievalPipeline
     from aic2026.retrieval.factory import load_index_for_query
 
-    parsed_query = Query.model_validate_json(query.read_text(encoding="utf-8"))
+    parsed_query = Query.model_validate_json(query.read_text(encoding="utf-8-sig"))
     resolved_manifest, resolved_features = resolve_feature_sources(manifest, features)
     if manifest is None or features is None:
         typer.echo(
@@ -806,7 +813,7 @@ def agent_query(
         frames_per_video=20,
         video_metadata=video_metadata,
     )
-    text_encoder = OpenCLIPTextEmbedder()
+    text_encoder = OpenCLIPTextEmbedder(model_name=clip_model, pretrained=clip_pretrained)
     encode_text = text_encoder.encode
     tools = RetrievalTools(pipeline, encode_text, encode_images=text_encoder.encode_images)
     # coarse_top_k áp dụng cho cả KIS (video-level rerank) và TRAKE (DP coarse

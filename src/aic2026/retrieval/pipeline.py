@@ -803,6 +803,106 @@ class RetrievalPipeline:
             limit=top_frames,
         )
 
+    def adaptive_multimodal_retrieve_raw(
+        self,
+        visual_query: str,
+        text_embedding: np.ndarray,
+        bm25_index: BM25Index,
+        ocr_query: str = "",
+        asr_query: str = "",
+        w_vis: float = 0.6,
+        w_ocr: float = 0.2,
+        w_asr: float = 0.2,
+        top_frames: int = 500,
+        video_ids: set[str] | None = None,
+    ) -> list[Candidate]:
+        """Adaptive multimodal retrieval with dynamic weights and min-max score fusion (AAAI 2026).
+
+        Combines Visual (CLIP), On-Screen Text (OCR), and Speech Transcripts (ASR)
+        using min-max normalized score fusion weighted by the Agent's predicted weights.
+        """
+        def _norm(scores: np.ndarray) -> np.ndarray:
+            if scores.size == 0:
+                return scores
+            s_min = float(scores.min())
+            s_max = float(scores.max())
+            if s_max - s_min < 1e-6:
+                return np.ones_like(scores, dtype=np.float32)
+            return ((scores - s_min) / (s_max - s_min + 1e-6)).astype(np.float32)
+
+        # Normalize weights so sum is 1.0
+        total_w = max(1e-6, w_vis + w_ocr + w_asr)
+        wv, wo, wa = w_vis / total_w, w_ocr / total_w, w_asr / total_w
+
+        fused_scores: dict[int, float] = {}
+
+        # 1. Visual branch
+        if wv > 0:
+            v_ids, v_scores = self.search_with_filter(text_embedding, top_frames, video_ids)
+            if v_ids.size > 0:
+                v_norm = _norm(v_scores)
+                for rank, (idx, sc) in enumerate(zip(v_ids, v_norm)):
+                    manifest_idx = int(idx)
+                    fused_scores[manifest_idx] = fused_scores.get(manifest_idx, 0.0) + wv * (float(sc) + 1.0 / (60 + rank + 1))
+
+        # 2. OCR branch
+        if wo > 0 and not bm25_index.is_empty:
+            q_ocr = ocr_query.strip() if ocr_query.strip() else visual_query
+            o_ids, o_scores = bm25_index.search_ocr(q_ocr, top_frames)
+            if o_ids.size > 0:
+                o_norm = _norm(o_scores)
+                for rank, (idx, sc) in enumerate(zip(o_ids, o_norm)):
+                    manifest_idx = int(idx)
+                    fused_scores[manifest_idx] = fused_scores.get(manifest_idx, 0.0) + wo * (float(sc) + 1.0 / (60 + rank + 1))
+
+        # 3. ASR branch
+        if wa > 0 and not bm25_index.is_empty:
+            q_asr = asr_query.strip() if asr_query.strip() else visual_query
+            a_ids, a_scores = bm25_index.search_asr(q_asr, top_frames)
+            if a_ids.size > 0:
+                a_norm = _norm(a_scores)
+                for rank, (idx, sc) in enumerate(zip(a_ids, a_norm)):
+                    manifest_idx = int(idx)
+                    fused_scores[manifest_idx] = fused_scores.get(manifest_idx, 0.0) + wa * (float(sc) + 1.0 / (60 + rank + 1))
+
+        # Fallback if no modalities returned results
+        if not fused_scores:
+            return self.retrieve_raw(text_embedding, top_frames=top_frames, video_ids=video_ids)
+
+        return self._candidates_from_scores(fused_scores, limit=top_frames)
+
+    def adaptive_multimodal_retrieve(
+        self,
+        visual_query: str,
+        text_embedding: np.ndarray,
+        bm25_index: BM25Index,
+        ocr_query: str = "",
+        asr_query: str = "",
+        w_vis: float = 0.6,
+        w_ocr: float = 0.2,
+        w_asr: float = 0.2,
+        top_frames: int = 500,
+        max_answers: int = 100,
+        video_ids: set[str] | None = None,
+    ) -> list[Candidate]:
+        """Adaptive multimodal retrieval followed by per-video diversification."""
+        raw_candidates = self.adaptive_multimodal_retrieve_raw(
+            visual_query=visual_query,
+            text_embedding=text_embedding,
+            bm25_index=bm25_index,
+            ocr_query=ocr_query,
+            asr_query=asr_query,
+            w_vis=w_vis,
+            w_ocr=w_ocr,
+            w_asr=w_asr,
+            top_frames=top_frames,
+            video_ids=video_ids,
+        )
+        return self.diversify_candidates(
+            candidates=raw_candidates,
+            max_answers=max_answers,
+        )
+
     def hybrid_retrieve(
         self,
         text_query: str,

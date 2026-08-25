@@ -61,6 +61,7 @@ class RuntimeConfig(BaseModel):
     """Cấu hình nội bộ; UI gửi để backend nạp đúng index/encoder."""
     manifest_path: str | None = None
     features_path: str | None = None
+    clip_model: str = "ViT-B-32"
     clip_pretrained: str = "openai"
     llm_model: str = "qwen3.5:4b"
     ollama_url: str = "http://127.0.0.1:11434"
@@ -119,6 +120,7 @@ def load_orchestrator(
     vlm_timeout: int = 120,
     coarse_top_k: int = 200,
     query_type: str | None = None,
+    clip_model: str = "ViT-B-32",
 ):
     """Shared layer: index + encoders load once per runtime configuration."""
     from aic2026.agent import OllamaLLM, RetrievalAgent
@@ -156,7 +158,7 @@ def load_orchestrator(
     pipeline = RetrievalPipeline(
         index, manifest_records, frames_per_video=20, video_metadata=video_metadata
     )
-    text_encoder = OpenCLIPTextEmbedder(pretrained=clip_pretrained)
+    text_encoder = OpenCLIPTextEmbedder(model_name=clip_model, pretrained=clip_pretrained)
     tools = RetrievalTools(
         pipeline, text_encoder.encode, encode_images=text_encoder.encode_images
     )
@@ -220,6 +222,7 @@ def run_task(task_type: str, request: TaskRequest) -> AgentResult:
             vlm_timeout=config.vlm_timeout,
             late_interaction_weight=config.late_interaction_weight,
             query_type=task_type,
+            clip_model=config.clip_model,
         )
         return orchestrator.run(Query(query_id=request.query_id, type=task_type, text=request.text, question=request.question, events=request.events))
     except HTTPException:
@@ -306,6 +309,7 @@ def run_qa_candidates(request: TaskRequest) -> AgentResult:
             vlm_timeout=config.vlm_timeout,
             late_interaction_weight=config.late_interaction_weight,
             query_type="qa",
+            clip_model=config.clip_model,
         )
         # Phase-1 QA: retrieval only, no VLM. We pass vlm_backend="none" above so
         # tools.vlm_model is unset and ensure_vlm() is a no-op in _finalize — no

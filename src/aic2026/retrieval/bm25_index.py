@@ -68,6 +68,8 @@ class BM25Index:
     """
 
     _bm25: object = field(init=False, repr=False)
+    _bm25_ocr: object = field(init=False, repr=False, default=None)
+    _bm25_asr: object = field(init=False, repr=False, default=None)
     _size: int = field(init=False, repr=False)
     _empty: bool = field(init=False, repr=False)
     _video_text_by_id: dict[str, str] = field(init=False, repr=False, default_factory=dict)
@@ -84,9 +86,7 @@ class BM25Index:
                 "rank-bm25 is required: uv sync  (or pip install rank-bm25)"
             ) from exc
 
-        # Precompute per-video text once (NOT per frame). This is the fix:
-        # previously the same video's keywords were tokenized 200 times, which
-        # inflated term frequency and depressed IDF for video-level vocabulary.
+        # Precompute per-video text once (NOT per frame).
         store = video_metadata
         video_text: dict[str, str] = {}
         if store is not None:
@@ -95,71 +95,67 @@ class BM25Index:
                 text = " ".join(chunks).strip()
                 if text:
                     video_text[vm.video_id] = text
-        # Backward-compat: legacy manifests carry keywords per-frame. If the
-        # store is empty or absent for a video, fall back to the per-frame
-        # metadata_keywords so we don't silently lose all lexical evidence.
         self._video_text_by_id = video_text
 
         corpus: list[list[str]] = []
+        corpus_ocr: list[list[str]] = []
+        corpus_asr: list[list[str]] = []
+
         for record in manifest:
             text = video_text.get(record.video_id, "")
             if not text and record.metadata_keywords:
-                # Legacy fallback — keyword was copied per frame in old builds.
                 text = " ".join(record.metadata_keywords)
             corpus.append(_record_tokens(record, video_meta_text=text))
-        # BM25Okapi raises ZeroDivisionError when EVERY document is empty
-        # (no Objects/Metadata text), because self.idf ends up empty. In that
-        # case there is nothing to search lexically: fall back to a degenerate
-        # index that scores every document 0 (survives only via the vector index).
+            # Modality-specific token pools
+            corpus_ocr.append(_tokenize(" ".join(record.object_labels or [])))
+            asr_texts = getattr(record, "asr_text", None) or []
+            corpus_asr.append(_tokenize(" ".join(asr_texts)))
+
+        self._size = len(corpus)
         if not any(corpus):
             self._bm25 = None
-            self._size = len(corpus)
+            self._bm25_ocr = None
+            self._bm25_asr = None
             self._empty = True
             return
-        # BM25Okapi handles individual empty token lists gracefully (scores them 0)
+
         self._bm25 = BM25Okapi(corpus)
-        # Ensure positive IDF floor so terms matching in small test corpora or
-        # 50% frequency documents still yield positive scores (> 0).
-        if hasattr(self._bm25, "idf") and isinstance(self._bm25.idf, dict):
-            for word, val in self._bm25.idf.items():
-                if val <= 0:
-                    self._bm25.idf[word] = 0.01
-        self._size = len(corpus)
+        self._apply_idf_floor(self._bm25)
+
+        self._bm25_ocr = BM25Okapi(corpus_ocr) if any(corpus_ocr) else None
+        if self._bm25_ocr is not None:
+            self._apply_idf_floor(self._bm25_ocr)
+
+        self._bm25_asr = BM25Okapi(corpus_asr) if any(corpus_asr) else None
+        if self._bm25_asr is not None:
+            self._apply_idf_floor(self._bm25_asr)
+
         self._empty = False
+
+    @staticmethod
+    def _apply_idf_floor(bm25_obj: object, floor: float = 0.01) -> None:
+        """Ensure positive IDF floor so matching terms still yield positive scores (> 0)."""
+        if hasattr(bm25_obj, "idf") and isinstance(bm25_obj.idf, dict):
+            for word, val in bm25_obj.idf.items():
+                if val <= 0:
+                    bm25_obj.idf[word] = floor
 
     @property
     def is_empty(self) -> bool:
-        """True when no frame has any lexical text (Objects/Metadata empty).
-
-        Callers use this to skip the hybrid/BM25 path entirely when the manifest
-        carries no text — so retrieval falls back to the vector index without the
-        (useless) BM25 round-trip. Once objects/metadata are loaded, this flips to
-        False and lexical retrieval is used automatically.
-        """
+        """True when no frame has any lexical text (Objects/Metadata empty)."""
         return self._empty
 
     # ------------------------------------------------------------------
-    def search(self, query: str, k: int) -> tuple[np.ndarray, np.ndarray]:
-        """Return top-k (indices, bm25_scores) for *query*.
-
-        Indices correspond to positions in the manifest list passed to __init__.
-        Scores are raw BM25 values (always >= 0); they are NOT normalised to [0,1]
-        because RRF fusion only uses ranks, not raw score magnitudes.
-        """
-        tokens = _tokenize(query)
-        if not tokens or self._size == 0:
+    def _search_engine(self, engine: object | None, query: str, k: int) -> tuple[np.ndarray, np.ndarray]:
+        if engine is None or self._size == 0:
             return np.array([], dtype=np.intp), np.array([], dtype=np.float32)
-
-        # Degenerate index (empty corpus): no lexical evidence, score everything 0.
-        if self._bm25 is None:
+        tokens = _tokenize(query)
+        if not tokens:
             return np.array([], dtype=np.intp), np.array([], dtype=np.float32)
 
         scores: np.ndarray = np.asarray(
-            self._bm25.get_scores(tokens), dtype=np.float32
+            engine.get_scores(tokens), dtype=np.float32  # type: ignore
         )
-        # Do not return arbitrary zero-score documents.  When a query has no
-        # lexical match, ``argpartition`` otherwise picks implementation/order
-        # dependent rows and RRF incorrectly boosts them over vector results.
         positive_ids = np.flatnonzero(scores > 0)
         if positive_ids.size == 0:
             return np.array([], dtype=np.intp), np.array([], dtype=np.float32)
@@ -168,12 +164,29 @@ class BM25Index:
         if k <= 0:
             return np.array([], dtype=np.intp), np.array([], dtype=np.float32)
 
-        # Partial sort for efficiency (same pattern as VectorIndex)
         candidate_scores = scores[positive_ids]
         top_positions = np.argpartition(-candidate_scores, k - 1)[:k]
         top_ids = positive_ids[top_positions]
         top_ids = top_ids[np.argsort(-scores[top_ids])]
         return top_ids, scores[top_ids]
+
+    def search(self, query: str, k: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return top-k (indices, bm25_scores) across full lexical corpus."""
+        return self._search_engine(self._bm25, query, k)
+
+    def search_ocr(self, query: str, k: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return top-k (indices, bm25_scores) specifically matching on-screen OCR text & object labels."""
+        if self._bm25_ocr is None:
+            return self.search(query, k)
+        res = self._search_engine(self._bm25_ocr, query, k)
+        return res if len(res[0]) > 0 else self.search(query, k)
+
+    def search_asr(self, query: str, k: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return top-k (indices, bm25_scores) specifically matching speech transcript (ASR) text."""
+        if self._bm25_asr is None:
+            return self.search(query, k)
+        res = self._search_engine(self._bm25_asr, query, k)
+        return res if len(res[0]) > 0 else self.search(query, k)
 
     @classmethod
     def from_manifest(
@@ -183,3 +196,4 @@ class BM25Index:
     ) -> BM25Index:
         """Convenience constructor; mirrors VectorIndex.from_npy naming style."""
         return cls(manifest, video_metadata=video_metadata)
+

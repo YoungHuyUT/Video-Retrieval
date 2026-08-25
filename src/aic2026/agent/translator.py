@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
+from aic2026.agent.types import ModalityDecomposition
+
 if TYPE_CHECKING:
     from aic2026.agent.local_llm import LocalLLM
 
@@ -483,3 +485,116 @@ def translate_query_fields(
     )
     source = "offline_fallback" if had_llm_failure else ("llm" if had_llm_success else "offline")
     return new_text, new_question, new_events, changed, source
+
+
+_DECOMPOSITION_SYSTEM_PROMPT = (
+    "You are a multimodal query routing and decomposition agent for video retrieval (AAAI 2026). "
+    "Given a user query (in Vietnamese or English), decompose it into 3 modality-specific sub-queries and assign importance weights (w_vis, w_ocr, w_asr) summing to 1.0:\n"
+    "1. visual_query (w_vis): visual concepts, actions, scenes, objects, colors seen on screen.\n"
+    "2. ocr_query (w_ocr): textual cues read on screen, banners, jersey names, signs, logos.\n"
+    "3. asr_query (w_asr): spoken dialogue, speech keywords, commentary, narration heard in audio.\n\n"
+    "Rules:\n"
+    "- If query specifically seeks on-screen text, signs, logos, or quoted text, assign high w_ocr (e.g. 0.5 - 0.7).\n"
+    "- If query seeks spoken statements, news anchor speech, broadcast dialogue, assign high w_asr (e.g. 0.4 - 0.6).\n"
+    "- For standard visual scene descriptions, visual weight w_vis should dominate (e.g. 0.6 - 0.8).\n"
+    "- visual_query MUST be translated into clean English.\n"
+    "- Reply ONLY with a valid JSON object matching the schema:\n"
+    '{"visual_query": "...", "ocr_query": "...", "asr_query": "...", "w_vis": 0.6, "w_ocr": 0.2, "w_asr": 0.2, "reason": "..."}'
+)
+
+
+def offline_decompose_modalities(query_text: str) -> ModalityDecomposition:
+    """Deterministic rule-based modality decomposition when LLM is unavailable."""
+    text = (query_text or "").strip()
+    text_lower = text.lower()
+
+    # Extract quoted text if any
+    quotes = _BRACKET_RE.findall(text)
+    quoted_str = " ".join([q.strip('"\'«»“”[]()') for q in quotes if len(q) > 2])
+
+    # OCR indicators
+    ocr_keywords = [
+        "chữ", "biển", "bảng", "logo", "text", "banner", "sign",
+        "tấm bảng", "tiêu đề", "dòng chữ", "áo số", "jersey", "tên hiệu",
+    ]
+    has_ocr_cue = bool(quotes) or any(kw in text_lower for kw in ocr_keywords)
+
+    # ASR speech indicators
+    asr_keywords = [
+        "phát thanh viên", "nói", "nói rằng", "thông báo", "bản tin",
+        "lời thoại", "phỏng vấn", "hát", "giọng", "speech", "saying",
+        "dialogue", "anchor", "tuyên bố", "phát biểu",
+    ]
+    has_asr_cue = any(kw in text_lower for kw in asr_keywords)
+
+    if has_ocr_cue and not has_asr_cue:
+        ocr_q = quoted_str if quoted_str else text
+        return ModalityDecomposition(
+            visual_query=text,
+            ocr_query=ocr_q,
+            asr_query="",
+            w_vis=0.35,
+            w_ocr=0.55,
+            w_asr=0.10,
+            reason="Detected text/sign/quoted keyword indicating on-screen OCR importance.",
+        )
+    elif has_asr_cue and not has_ocr_cue:
+        return ModalityDecomposition(
+            visual_query=text,
+            ocr_query="",
+            asr_query=text,
+            w_vis=0.35,
+            w_ocr=0.10,
+            w_asr=0.55,
+            reason="Detected speech/news/dialogue keywords indicating audio ASR importance.",
+        )
+    elif has_ocr_cue and has_asr_cue:
+        return ModalityDecomposition(
+            visual_query=text,
+            ocr_query=quoted_str or text,
+            asr_query=text,
+            w_vis=0.30,
+            w_ocr=0.35,
+            w_asr=0.35,
+            reason="Detected both text and speech cues.",
+        )
+    else:
+        return ModalityDecomposition(
+            visual_query=text,
+            ocr_query=text,
+            asr_query=text,
+            w_vis=0.60,
+            w_ocr=0.20,
+            w_asr=0.20,
+            reason="Default visual-dominant multimodal query.",
+        )
+
+
+def decompose_query_modalities(
+    query_text: str,
+    llm: LocalLLM | None = None,
+    use_llm: bool = True,
+) -> ModalityDecomposition:
+    """Decompose query into modality sub-queries & weights (w_vis, w_ocr, w_asr).
+
+    Uses LLM when available; falls back to deterministic rule-based heuristic.
+    """
+    if not query_text:
+        return ModalityDecomposition(visual_query="")
+
+    if use_llm and llm is not None:
+        try:
+            res = llm.structured(_DECOMPOSITION_SYSTEM_PROMPT, query_text, ModalityDecomposition)
+            # Normalize weights so sum is 1.0
+            total_w = max(1e-6, res.w_vis + res.w_ocr + res.w_asr)
+            res.w_vis = round(res.w_vis / total_w, 3)
+            res.w_ocr = round(res.w_ocr / total_w, 3)
+            res.w_asr = round(res.w_asr / total_w, 3)
+            if not res.visual_query:
+                res.visual_query = query_text
+            return res
+        except Exception as exc:
+            logger.warning("LLM query decomposition failed (%s); using offline heuristic.", exc)
+
+    return offline_decompose_modalities(query_text)
+

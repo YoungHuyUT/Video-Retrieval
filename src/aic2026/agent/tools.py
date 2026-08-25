@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from aic2026.agent.types import ModalityDecomposition
 from aic2026.models import Candidate, FrameRecord
 
 logger = logging.getLogger(__name__)
@@ -128,22 +129,14 @@ class RetrievalTools:
     def retrieve(
         self,
         query: str | list[str],
-        limit: int,
-        task_type: str | None = None,
+        limit: int = 100,
+        task_type: str = "kis",
+        modality: ModalityDecomposition | None = None,
     ) -> list[Candidate]:
         """Retrieve task-appropriate candidates.
 
-        KIS receives diversified results. QA and TRAKE receive raw candidates
-        so that multiple relevant frames from the same video are preserved.
-        Every non-TRAKE path is then reranked by lexical keyword overlap with
-        object/metadata text (a small deterministic score bonus), so frames
-        whose labels/titles mention the query terms float above pure vector
-        matches.
-
-        ``query`` may be a single string or a list of query variants
-        (multi-query expansion). When multiple variants are given, each is
-        encoded and the resulting ranked lists are fused with Reciprocal Rank
-        Fusion before reranking, improving recall.
+        Supports Adaptive Multimodal Score Fusion (AAAI 2026) across Visual (CLIP),
+        On-Screen Text (OCR), and Speech Transcripts (ASR).
         """
 
         if limit <= 0:
@@ -190,23 +183,26 @@ class RetrievalTools:
         pool = limit
 
         if self.bm25_index is not None and not self.bm25_index.is_empty:
-            logger.debug("BM25 lexical index active; fusing with vector retrieval.")
-            if requires_dense_evidence:
-                candidates = self.pipeline.hybrid_retrieve_raw(
-                    text_query=queries[0],
-                    text_embedding=embeddings[0],
-                    bm25_index=self.bm25_index,
-                    top_frames=pool,
-                    video_ids=allowed_video_ids,
-                )
-            else:
-                candidates = self.pipeline.hybrid_retrieve_raw(
-                    text_query=queries[0],
-                    text_embedding=embeddings[0],
-                    bm25_index=self.bm25_index,
-                    top_frames=pool,
-                    video_ids=allowed_video_ids,
-                )
+            logger.debug("Adaptive multimodal retrieval active; fusing Visual, OCR, and ASR.")
+            vis_q = modality.visual_query if modality and modality.visual_query else queries[0]
+            ocr_q = modality.ocr_query if modality else ""
+            asr_q = modality.asr_query if modality else ""
+            w_vis = modality.w_vis if modality else 0.6
+            w_ocr = modality.w_ocr if modality else 0.2
+            w_asr = modality.w_asr if modality else 0.2
+
+            candidates = self.pipeline.adaptive_multimodal_retrieve_raw(
+                visual_query=vis_q,
+                text_embedding=embeddings[0],
+                bm25_index=self.bm25_index,
+                ocr_query=ocr_q,
+                asr_query=asr_q,
+                w_vis=w_vis,
+                w_ocr=w_ocr,
+                w_asr=w_asr,
+                top_frames=pool,
+                video_ids=allowed_video_ids,
+            )
         elif requires_dense_evidence:
             candidates = self.pipeline.retrieve_raw(
                 text_embedding=embeddings[0],
