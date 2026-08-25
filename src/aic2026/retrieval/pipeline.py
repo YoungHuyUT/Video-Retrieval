@@ -502,13 +502,24 @@ class RetrievalPipeline:
             ranked_videos = ranked_videos[:top_videos]
 
         reranked: list[Candidate] = []
+        max_f_score = max((c.score for c in candidates), default=1.0)
+        max_v_score = max(video_scores.values()) if video_scores else 1.0
+        min_v_score = min(video_scores.values()) if video_scores else 0.0
+        v_span = max(max_v_score - min_v_score, 1e-6)
+
         for video_id in ranked_videos:
+            v_norm = (video_scores[video_id] - min_v_score) / v_span
             for rank, frame in enumerate(by_video[video_id][:frames_per_video]):
                 if keep_frame_scores:
                     score = frame_scores.get(frame.vector_id, frame.score) if frame_scores else frame.score
                 else:
-                    score = video_scores[video_id] - rank * 1e-4
-                reranked.append(frame.model_copy(update={"score": score}))
+                    # Blended frame-video score:
+                    # - 65% weight on individual frame visual match
+                    # - 35% weight on overall video consistency
+                    f_norm = frame.score / max(max_f_score, 1e-6)
+                    blended = 0.65 * f_norm + 0.35 * v_norm
+                    score = blended - rank * 1e-5
+                reranked.append(frame.model_copy(update={"score": float(score)}))
 
         return sorted(reranked, key=lambda c: c.score, reverse=True)
 
