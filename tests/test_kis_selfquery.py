@@ -4,16 +4,21 @@ import json
 
 import numpy as np
 
+from aic2026.ingestion import resolve_feature_sources
 from aic2026.models import FrameRecord
 from aic2026.retrieval import RetrievalPipeline
 from aic2026.retrieval.index import VectorIndex
 
 
 def _load_derived() -> tuple[np.ndarray, list[FrameRecord]]:
-    feats = np.load("data/processed/derived_features.npy")
+    m_path, f_path = resolve_feature_sources()
+    if not m_path.exists() or not f_path.exists():
+        import pytest
+        pytest.skip(f"Index files not found at {m_path} or {f_path}")
+    feats = np.load(f_path, mmap_mode="r")
     recs = [
         FrameRecord(**json.loads(line))
-        for line in open("data/processed/derived_manifest.jsonl", encoding="utf-8")
+        for line in open(m_path, encoding="utf-8")
         if line.strip()
     ]
     return feats, recs

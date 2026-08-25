@@ -7,33 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from aic2026.models import Candidate
+from aic2026.qa.answers import clean_vqa_answer, resolve_keyframe_path
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_frame_path(keyframe_path: str | None) -> Path | None:
-    """Resolve a manifest-relative keyframe path against common project roots."""
-    if not keyframe_path:
-        return None
-    candidate = Path(keyframe_path)
-    if candidate.is_absolute() and candidate.exists():
-        return candidate
-    if candidate.exists():
-        return candidate
-    root = Path.cwd()
-    name = candidate.name
-    parent_name = candidate.parent.name
-    probes = [
-        root / keyframe_path,
-        root / "data" / keyframe_path,
-        root / "data" / "raw" / keyframe_path,
-        root / "data" / "raw" / "Keyframes" / keyframe_path,
-        root / "data" / "raw" / "Keyframes" / parent_name / name,
-    ]
-    for probe in probes:
-        if probe.exists():
-            return probe
-    return None
 
 
 def _encode_image_base64(path: Path, max_size: int = 512, quality: int = 80) -> str:
@@ -305,7 +281,7 @@ class OllamaVisionModel:
         top = _select_temporal_diverse(candidates, top_k)
         images: list[str] = []
         for candidate in top:
-            path = _resolve_frame_path(candidate.keyframe_path)
+            path = resolve_keyframe_path(candidate.keyframe_path)
             if path is not None and path.exists():
                 images.append(_encode_image_base64(path))
         if not images:
@@ -365,7 +341,7 @@ class OllamaVisionModel:
             )
             return None
 
-        return content.strip() or None
+        return clean_vqa_answer(content)
 
 
 def list_ollama_vision_models(

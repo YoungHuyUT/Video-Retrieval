@@ -166,15 +166,25 @@ class RetrievalAgent:
         else:
             trace = []
 
+        # For QA, retrieval text combines context text and question keywords
+        retrieval_text = query.text
+        if query.type == "qa" and query.question:
+            q_clean = query.question.strip()
+            t_clean = query.text.strip()
+            if t_clean and q_clean and q_clean.lower() not in t_clean.lower():
+                retrieval_text = f"{t_clean} {q_clean}"
+            elif not t_clean and q_clean:
+                retrieval_text = q_clean
+
         # Modality routing & decomposition (Visual / OCR / ASR) — AAAI 2026
         modality_plan = decompose_query_modalities(
-            query.text,
+            retrieval_text,
             llm=self.llm,
             use_llm=self.translate and self.llm is not None,
         )
 
         plan = AgentPlan(
-            query_variants=[query.text],
+            query_variants=[retrieval_text],
             events=(
                 list(query.events)
                 if query.type == "trake"
@@ -234,7 +244,7 @@ class RetrievalAgent:
         # KIS / Q&A: retrieve with Adaptive Multimodal Fusion across Visual, OCR, and ASR
         self.tools.video_prefixes = None
         found = self.tools.retrieve(
-            query=query.text,
+            query=retrieval_text,
             limit=self.retrieval_pool_size,
             task_type=query.type,
             modality=modality_plan,

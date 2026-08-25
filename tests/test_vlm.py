@@ -77,3 +77,17 @@ def test_prompt_english_short() -> None:
     prompt = QwenVLM._build_prompt("What color is the cup?")
     assert "English" in prompt
     assert "<|image_pat|>" not in prompt  # processor chèn token ảnh tự động
+
+
+def test_translate_vqa_question() -> None:
+    from aic2026.qa.answers import translate_vqa_question
+    assert "how many" in translate_vqa_question("Có bao nhiêu người trong phòng?")
+    assert "what color" in translate_vqa_question("Chiếc xe ô tô màu gì?")
+    assert translate_vqa_question("what color is the shirt?") == "what color is the shirt?"
+
+
+def test_clean_vqa_answer() -> None:
+    from aic2026.qa.answers import clean_vqa_answer
+    assert clean_vqa_answer("<VQA>What color?<s>red</s>") == "Red"
+    assert clean_vqa_answer("QA> 2 people <loc_123>") == "2 people"
+    assert clean_vqa_answer(None) is None

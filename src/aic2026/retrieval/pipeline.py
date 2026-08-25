@@ -600,19 +600,19 @@ class RetrievalPipeline:
             1e-12,
         )
 
-        # Stage 1: video-level coarse filter (thay vì gom mọi video khớp 1 event).
-        # Centroid của các event query, normalize -> đo cosine với video-embedding.
-        query_centroid = query_matrix.mean(axis=0)
-        centroid_norm = float(np.linalg.norm(query_centroid))
-        if centroid_norm > 0:
-            query_centroid = query_centroid / centroid_norm
-
+        # Stage 1: video-level coarse filter across all event queries.
+        # Compute event-wise similarities for each video: [V x E] = [V x D] @ [E x D].T
         if coarse_top_k > 0 and len(self._video_embeddings) > coarse_top_k:
             video_ids_list = list(self._video_embeddings)
             mat = np.stack(
                 [self._video_embeddings[v] for v in video_ids_list]
-            )  # [V × 512]
-            scores = mat @ query_centroid  # [V]
+            )  # [V x D]
+            v_norms = np.maximum(np.linalg.norm(mat, axis=1, keepdims=True), 1e-12)
+            mat_norm = mat / v_norms
+            event_sims = mat_norm @ query_matrix.T  # [V x E]
+
+            # Multi-event coverage score: average event similarity + min event similarity
+            scores = np.mean(event_sims, axis=1) + 0.3 * np.min(event_sims, axis=1)
             top_idx = np.argsort(scores)[-coarse_top_k:][::-1]
             candidate_videos = {
                 video_ids_list[int(i)] for i in top_idx

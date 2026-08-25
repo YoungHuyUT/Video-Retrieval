@@ -19,31 +19,9 @@ logger = logging.getLogger(__name__)
 #   * 1 model duy nhất xử lý caption + OCR + VQA qua task prompt (không ghép pipeline).
 # Prompt format: "<VQA>{question}" — yêu cầu question bằng TIẾNG ANH (model train chủ
 # yếu EN; query Tiếng Việt sẽ trả rác, nên pipeline dự án chuyển query sang EN trước).
+from aic2026.qa.answers import clean_vqa_answer, resolve_keyframe_path, translate_vqa_question
+
 _MODEL_ID = "microsoft/Florence-2-base-ft"
-
-
-def _resolve_frame_path(keyframe_path: str | None) -> Path | None:
-    """Resolve a manifest-relative keyframe path against common project roots."""
-    if not keyframe_path:
-        return None
-    candidate = Path(keyframe_path)
-    if candidate.is_absolute() and candidate.exists():
-        return candidate
-    if candidate.exists():
-        return candidate
-    root = Path.cwd()
-    name = candidate.name
-    parent_name = candidate.parent.name
-    for probe in (
-        root / keyframe_path,
-        root / "data" / keyframe_path,
-        root / "data" / "raw" / keyframe_path,
-        root / "data" / "raw" / "Keyframes" / keyframe_path,
-        root / "data" / "raw" / "Keyframes" / parent_name / name,
-    ):
-        if probe.exists():
-            return probe
-    return None
 
 
 class FlorenceVLM:
@@ -53,9 +31,8 @@ class FlorenceVLM:
     ``answer_question(question, candidates) -> {vector_id: answer}`` interface, so
     the agent degrades gracefully (returns ``{}`` when the model is unavailable).
 
-    Strategy: one VQA call per distinct video on its highest-scoring frame, then
-    propagate that answer to every candidate of the same video — keeps VLM calls
-    low (~number of videos) while still answering all candidates.
+    Strategy: test the top representative frames of each distinct video,
+    and propagate that answer to every candidate of the same video.
     """
 
     def __init__(
@@ -151,7 +128,10 @@ class FlorenceVLM:
         if not self._loaded:
             return {}
 
-        # Group candidates by video; pick the highest-scoring frame per video.
+        # Normalize/translate Vietnamese question to English for Florence-2 VQA
+        en_question = translate_vqa_question(question)
+
+        # Group candidates by video; pick the highest-scoring frames per video.
         by_video: dict[str, list[Candidate]] = defaultdict(list)
         for cand in candidates:
             if cand.vector_id is not None:
@@ -160,8 +140,12 @@ class FlorenceVLM:
         answers: dict[int, str] = {}
         for video_candidates in by_video.values():
             ordered = sorted(video_candidates, key=lambda c: c.score, reverse=True)
-            rep = ordered[0]
-            answer = self._answer_one(question, rep)
+            # Try top-3 candidate frames of this video until a valid answer is generated
+            answer = None
+            for rep in ordered[:3]:
+                answer = self._answer_one(en_question, rep)
+                if answer:
+                    break
             if answer is None:
                 continue
             for cand in video_candidates:
@@ -179,11 +163,6 @@ class FlorenceVLM:
         candidates: list[Candidate],
         max_workers: int = 1,
     ) -> dict[int, str]:
-        """Alias mirroring OllamaVisionModel.answer_question_parallel.
-
-        Florence-2 runs single-threaded per call; we ignore ``max_workers`` and
-        answer all candidates in one pass (already grouped by video).
-        """
         return self.answer_question(question, candidates)
 
     # ------------------------------------------------------------------
@@ -193,7 +172,7 @@ class FlorenceVLM:
     def _answer_one(self, question: str, candidate: Candidate) -> str | None:
         if self._processor is None or self._model is None:
             return None
-        path = _resolve_frame_path(candidate.keyframe_path)
+        path = resolve_keyframe_path(candidate.keyframe_path)
         if path is None or not path.exists():
             logger.debug(
                 "FlorenceVLM: missing keyframe %s for %s",
@@ -215,25 +194,11 @@ class FlorenceVLM:
                     max_new_tokens=self.max_new_tokens,
                     do_sample=False,
                 )
-            # NOTE: we deliberately avoid processor.post_process_generation —
-            # on Windows it segfaults (threading/interpreter shutdown issue).
-            # Decode raw text ONCE (decoding the same tensor twice also crashes
-            # on Windows) and strip Florence-2's echoed task prompt plus any
-            # <loc_*> grounding tokens it appends for VQA.
             decoded = self._processor.batch_decode(
                 generated, skip_special_tokens=True
             )[0]
-            # The decoded string is "<VQA>{question}{answer}". Slice off the
-            # exact prompt prefix (don't naive-replace — the answer could echo it).
             answer = decoded[len(prompt):] if decoded.startswith(prompt) else decoded
-            # Drop grounding location tokens (<loc_N>) that Florence-2 emits.
-            answer = re.sub(r"<loc_\d+>", " ", answer)
-            answer = answer.replace("<s>", "").replace("</s>", "").strip()
-            # Sometimes the raw answer is wrapped as "QA>..." — drop that wrapper.
-            if answer.startswith("QA>"):
-                answer = answer[3:].strip()
-            # Empty after stripping the prompt means the model produced no answer.
-            return answer or None
+            return clean_vqa_answer(answer)
         except Exception as exc:  # noqa: BLE001 — per-frame failure must not abort
             logger.debug("FlorenceVLM: failed on %s: %s", candidate.frame_id, exc)
             return None

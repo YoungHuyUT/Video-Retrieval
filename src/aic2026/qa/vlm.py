@@ -115,18 +115,7 @@ def _load_model_class() -> tuple[Any, Any] | None:
         return None
 
 
-def _resolve_frame_path(keyframe_path: str | None) -> Path | None:
-    """Resolve a manifest-relative keyframe path against the project root."""
-    if not keyframe_path:
-        return None
-    candidate = Path(keyframe_path)
-    if candidate.exists():
-        return candidate
-    root = Path.cwd()
-    for probe in (root / keyframe_path, root / "data" / "raw" / keyframe_path):
-        if probe.exists():
-            return probe
-    return None
+from aic2026.qa.answers import resolve_keyframe_path
 
 
 class QwenVLM:
@@ -342,7 +331,7 @@ class QwenVLM:
         top = _select_temporal_diverse(candidates, top_k)
         images: list[Image.Image] = []
         for candidate in top:
-            path = _resolve_frame_path(candidate.keyframe_path)
+            path = resolve_keyframe_path(candidate.keyframe_path)
             if path is not None and path.exists():
                 try:
                     images.append(Image.open(path).convert("RGB"))
@@ -401,7 +390,7 @@ class QwenVLM:
         if not self._loaded or self._processor is None or self._model is None:
             return None
 
-        path = _resolve_frame_path(candidate.keyframe_path)
+        path = resolve_keyframe_path(candidate.keyframe_path)
         if path is None or not path.exists():
             logger.debug(
                 "QwenVLM: missing keyframe %s for %s (frame %s)",

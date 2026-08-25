@@ -287,10 +287,18 @@ def run_backend_qa_answers(
 # Helpers
 # ---------------------------------------------------------------------------
 def parse_events(events_text: str) -> list[str]:
-    events = [line.strip(" -•\t") for line in events_text.splitlines() if line.strip()]
-    if len(events) == 1 and ";" in events[0]:
-        events = [part.strip() for part in events[0].split(";") if part.strip()]
-    return events
+    raw_lines = [line.strip() for line in (events_text or "").splitlines() if line.strip()]
+    if len(raw_lines) == 1:
+        if ";" in raw_lines[0]:
+            raw_lines = [part.strip() for part in raw_lines[0].split(";") if part.strip()]
+        elif "->" in raw_lines[0]:
+            raw_lines = [part.strip() for part in raw_lines[0].split("->") if part.strip()]
+    cleaned = []
+    for line in raw_lines:
+        l = _re.sub(r"^(?:event\s*\d+[\s:.-]*|\d+[\s:.)-]+\s*|[-*•]\s*)", "", line, flags=_re.IGNORECASE).strip()
+        if l:
+            cleaned.append(l)
+    return cleaned
 
 
 def build_query(query_type: str, text: str, question: str, events_text: str) -> Query:
@@ -501,14 +509,14 @@ def _render_trake_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
             st.caption("Candidate này không có event_frames.")
         else:
             if len(event_frames) != len(query.events):
-                st.caption(f"Số event frame không khớp: {len(event_frames)}/{len(query.events)}.")
+                st.caption(f"Số event frame: {len(event_frames)}/{len(query.events)}.")
             rows = [event_frames[i : i + 4] for i in range(0, len(event_frames), 4)]
-            for row in rows:
+            for row_start, row in enumerate(rows):
                 cols = st.columns(len(row))
-                for col, frame_id in zip(cols, row):
+                for col_idx, (col, frame_id) in enumerate(zip(cols, row)):
+                    ev_idx = row_start * 4 + col_idx
                     path = event_keyframe_file(item.video_id, frame_id, lookup, root)
-                    ev_idx = event_frames.index(frame_id)
-                    ev_text = query.events[ev_idx] if ev_idx < len(query.events) else f"event {ev_idx + 1}"
+                    ev_text = query.events[ev_idx] if ev_idx < len(query.events) else f"Sự kiện {ev_idx + 1}"
                     with col:
                         if path and path.exists():
                             st.markdown('<div class="hero-wrap">', unsafe_allow_html=True)
@@ -516,7 +524,7 @@ def _render_trake_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
                             st.markdown("</div>", unsafe_allow_html=True)
                         else:
                             st.caption("Không có ảnh")
-                        st.caption(f"**{ev_text}**\nframe {frame_id}")
+                        st.caption(f"**#{ev_idx + 1}: {html.escape(ev_text)}**\n`frame {frame_id}`")
         nonce = int(st.session_state.get("_query_nonce", 0))
         st.checkbox("Chọn video này", key=f"sel_{nonce}_{idx}", value=(idx in selected), on_change=_toggle, args=(idx, nonce))
         st.divider()
