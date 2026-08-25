@@ -31,6 +31,32 @@ class BackendRequestError(RuntimeError):
     """Raised when the UI cannot obtain a valid result from the backend."""
 
 
+def _detect_default_path(candidates: list[str]) -> str:
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    return candidates[0]
+
+
+DEFAULT_MANIFEST = _detect_default_path([
+    "data/processed/official_manifest.jsonl",
+    r"D:\bachkhoa\ai_challenge\data\processed\derived_manifest.jsonl",
+    "data/processed/derived_manifest.jsonl",
+])
+DEFAULT_FEATURES = _detect_default_path([
+    "data/processed/official_features.npy",
+    r"D:\bachkhoa\ai_challenge\data\processed\derived_features.npy",
+    "data/processed/derived_features.npy",
+])
+DEFAULT_ROOT = _detect_default_path([
+    r"D:\bachkhoa\ai_challenge\data\extracted\Keyframes",
+    r"D:\bachkhoa\ai_challenge\data\extracted",
+    "data/raw/Keyframes",
+    "data/processed",
+])
+DEFAULT_CLIP_MODEL = "ViT-L-14" if "derived" in DEFAULT_FEATURES else "ViT-B-32"
+
+
 st.set_page_config(page_title="PEGASUS", layout="wide")
 
 st.markdown(
@@ -298,17 +324,37 @@ def load_asr_lookup(manifest_path: str) -> dict[tuple[str, int], list[str]]:
 
 def resolve_keyframe_path(stored_path: str, root: Path) -> Path:
     path = Path(stored_path)
-    if path.is_absolute() or path.exists():
+    if path.exists():
         return path
-    for candidate in (
-        root / path,
-        Path.cwd() / path,
-        Path.cwd() / "data" / "raw" / path,
-        Path.cwd() / "data" / "processed" / path,
-    ):
-        if candidate.exists():
-            return candidate
-    return root / path
+
+    parts = path.parts
+    rel_candidates: list[Path] = []
+    if "Keyframes" in parts:
+        kf_idx = parts.index("Keyframes")
+        rel_candidates.append(Path(*parts[kf_idx + 1 :]))
+        rel_candidates.append(Path(*parts[kf_idx:]))
+    elif len(parts) >= 2:
+        rel_candidates.append(Path(parts[-2]) / parts[-1])
+
+    rel_candidates.append(path)
+    if len(parts) >= 1:
+        rel_candidates.append(Path(parts[-1]))
+
+    for rel in rel_candidates:
+        for candidate in (
+            root / rel,
+            root / "Keyframes" / rel,
+            Path(r"D:\bachkhoa\ai_challenge\data\extracted\Keyframes") / rel,
+            Path(r"D:\bachkhoa\ai_challenge\data\extracted") / rel,
+            Path(r"D:\bachkhoa\ai_challenge\data\raw\Keyframes") / rel,
+            Path.cwd() / rel,
+            Path.cwd() / "data" / "raw" / rel,
+            Path.cwd() / "data" / "extracted" / "Keyframes" / rel,
+            Path.cwd() / "data" / "processed" / rel,
+        ):
+            if candidate.exists():
+                return candidate
+    return root / path.name
 
 
 def keyframe_file(candidate: Candidate, root: Path) -> Path | None:
@@ -319,9 +365,22 @@ def keyframe_file(candidate: Candidate, root: Path) -> Path | None:
 
 def event_keyframe_file(video_id: str, frame_id: int, lookup: dict[tuple[str, int], str], root: Path) -> Path | None:
     stored_path = lookup.get((video_id, frame_id))
-    if stored_path is None:
-        return None
-    return resolve_keyframe_path(stored_path, root)
+    if stored_path is not None:
+        p = resolve_keyframe_path(stored_path, root)
+        if p and p.exists():
+            return p
+    for base in (
+        root,
+        root / "Keyframes",
+        Path(r"D:\bachkhoa\ai_challenge\data\extracted\Keyframes"),
+        Path(r"D:\bachkhoa\ai_challenge\data\extracted"),
+        Path.cwd() / "data" / "raw" / "Keyframes",
+    ):
+        for pattern in (f"{frame_id:03d}.jpg", f"{frame_id:04d}.jpg", f"{frame_id}.jpg"):
+            candidate = base / video_id / pattern
+            if candidate.exists():
+                return candidate
+    return None
 
 
 def file_link(path: Path | None) -> str | None:
@@ -388,8 +447,7 @@ def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
             if path and path.exists():
                 st.markdown(f'<div class="gallery-card-container" data-video-id="{html.escape(item.video_id)}">', unsafe_allow_html=True)
                 st.markdown('<div class="hero-wrap">', unsafe_allow_html=True)
-                img_url = f"http://127.0.0.1:8000/images?path={urllib.parse.quote(str(path))}"
-                st.image(img_url, use_container_width=True)
+                st.image(str(path), use_container_width=True)
                 st.markdown("</div>", unsafe_allow_html=True)
             else:
                 st.markdown(f'<div class="gallery-card-container" data-video-id="{html.escape(item.video_id)}">', unsafe_allow_html=True)
@@ -563,9 +621,9 @@ if st.session_state.get("_run_agent"):
                 st.error("TRAKE cần ít nhất một event.")
             else:
                 runtime = {
-                    "manifest_path": st.session_state.get("cfg_manifest", "data/processed/official_manifest.jsonl"),
-                    "features_path": st.session_state.get("cfg_features", "data/processed/official_features.npy"),
-                    "clip_model": st.session_state.get("cfg_clip_model", "ViT-B-32"),
+                    "manifest_path": st.session_state.get("cfg_manifest", DEFAULT_MANIFEST),
+                    "features_path": st.session_state.get("cfg_features", DEFAULT_FEATURES),
+                    "clip_model": st.session_state.get("cfg_clip_model", DEFAULT_CLIP_MODEL),
                     "clip_pretrained": st.session_state.get("cfg_clip", "openai"),
                     "llm_model": st.session_state.get("cfg_llm", "qwen3.5:4b"),
                     "ollama_url": st.session_state.get("cfg_ollama", "http://127.0.0.1:11434"),
@@ -646,10 +704,10 @@ if st.session_state.get("_run_agent"):
 
 with st.expander("Cấu hình nâng cao"):
     st.text_input("Backend API", "http://127.0.0.1:8000", key="cfg_backend")
-    st.text_input("Manifest", "data/processed/official_manifest.jsonl", key="cfg_manifest")
-    st.text_input("Feature .npy", "data/processed/official_features.npy", key="cfg_features")
-    st.text_input("Root keyframe", "data/processed", key="cfg_root")
-    st.text_input("CLIP model", "ViT-B-32", key="cfg_clip_model", help="ViT-B-32, ViT-L-14, ViT-L-14-quickgelu, ViT-B-16-SigLIP, ViT-SO400M-14-SigLIP-384")
+    st.text_input("Manifest", DEFAULT_MANIFEST, key="cfg_manifest")
+    st.text_input("Feature .npy", DEFAULT_FEATURES, key="cfg_features")
+    st.text_input("Root keyframe", DEFAULT_ROOT, key="cfg_root")
+    st.text_input("CLIP model", DEFAULT_CLIP_MODEL, key="cfg_clip_model", help="ViT-B-32, ViT-L-14, ViT-L-14-quickgelu, ViT-B-16-SigLIP, ViT-SO400M-14-SigLIP-384")
     st.text_input("CLIP pretrained", "openai", key="cfg_clip", help="openai, metaclip_fullcc, metaclip_400m, laion2b_s32b_b82k, webli")
     st.text_input("Ollama model", "qwen3.5:4b", key="cfg_llm")
     st.text_input("Ollama URL", "http://127.0.0.1:11434", key="cfg_ollama")
