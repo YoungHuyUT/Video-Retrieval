@@ -16,16 +16,48 @@ if TYPE_CHECKING:
 # Tokenizer
 # ---------------------------------------------------------------------------
 
-def _tokenize(text: str) -> list[str]:
-    """Unicode-aware tokenizer for Vietnamese/English text.
+_STRIP_MAP = str.maketrans({"đ": "d", "Đ": "D"})
 
-    Lowercases, strips diacritics-safe (keeps accents), removes punctuation,
-    and splits on whitespace. Works well for BM25 without an external library.
+
+def _strip_accents(text: str) -> str:
+    text = text.translate(_STRIP_MAP)
+    return "".join(
+        c for c in unicodedata.normalize("NFD", text)
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+def _tokenize(text: str) -> list[str]:
+    """Unicode & Vietnamese compound-aware tokenizer for BM25.
+
+    Generates unigrams, bigrams, and accent-folded representations to ensure
+    100% robust matching for both Vietnamese dialogue/OCR and English queries.
     """
-    text = unicodedata.normalize("NFC", text).lower()
-    # Remove punctuation but keep Unicode letters, digits and spaces
-    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
-    return [t for t in text.split() if t]
+    if not text:
+        return []
+    norm = unicodedata.normalize("NFC", text).lower()
+    clean = re.sub(r"[^\w\s]", " ", norm, flags=re.UNICODE)
+    words = [w for w in clean.split() if w]
+    if not words:
+        return []
+
+    tokens: list[str] = list(words)
+    # Generate bigrams for Vietnamese compound words
+    for i in range(len(words) - 1):
+        tokens.append(f"{words[i]}_{words[i+1]}")
+
+    # Generate accent-folded variants
+    stripped_words = [_strip_accents(w) for w in words]
+    for w, sw in zip(words, stripped_words):
+        if sw != w:
+            tokens.append(sw)
+    for i in range(len(stripped_words) - 1):
+        bw = f"{stripped_words[i]}_{stripped_words[i+1]}"
+        orig_bw = f"{words[i]}_{words[i+1]}"
+        if bw != orig_bw:
+            tokens.append(bw)
+
+    return tokens
 
 
 def _record_tokens(

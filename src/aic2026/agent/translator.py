@@ -131,67 +131,144 @@ def _is_vietnamese(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 # Từ điển hạt giống: token tiếng Việt (đã bỏ dấu, viết thường) -> tiếng Anh.
-# Không chứa từ đa nghĩa trùng nhau (vd "cho" chỉ lấy 1 nghĩa) để tránh nhiễu.
 _VN_EN_TOKENS: dict[str, str] = {
-    # người / động vật
-    "con": "a", "chu": "a", "cai": "a", "chiec": "a", "mu": "hat",
+    # Mạo từ / đại từ / phân loại
+    "con": "a", "chu": "a", "cai": "a", "chiec": "a", "mot": "a", "buc": "a", "tam": "a",
+    # Con người / nhân vật / vai trò
     "nguoi": "person", "dan": "people", "nam": "man", "nu": "woman",
-    "tre": "child", "em": "child", "ba": "grandfather", "me": "mother",
-    "bo": "father", "anh": "brother", "chi": "sister",
+    "dan ong": "man", "phu nu": "woman", "con trai": "boy", "con gai": "girl",
+    "tre": "child", "em": "child", "tre em": "children", "em be": "baby",
+    "nguoi gia": "elderly person", "ong lao": "old man", "ba lao": "old woman",
+    "ba": "grandmother", "me": "mother", "bo": "father", "anh": "brother", "chi": "sister",
+    # Nghề nghiệp chuyên biệt (AIC / thời sự / phóng sự)
+    "phat thanh vien": "news anchor in studio", "bien tap vien": "news editor",
+    "phong vien": "reporter with microphone", "nha bao": "journalist",
+    "nguoi dan chuong trinh": "host MC", "mc": "host",
+    "canh sat": "police officer", "canh sat giao thong": "traffic police officer",
+    "cong an": "police officer", "bo doi": "soldier", "quan doi": "military soldiers",
+    "linh": "soldier", "bao ve": "security guard", "linh cuu hoa": "firefighter",
+    "bac si": "doctor", "y ta": "nurse", "benh nhan": "patient", "duoc si": "pharmacist",
+    "hoc sinh": "student in uniform", "sinh vien": "college student",
+    "giao vien": "teacher", "thay giao": "male teacher", "co giao": "female teacher",
+    "cong nhan": "factory worker in uniform", "tho xay": "construction worker with helmet",
+    "nong dan": "farmer", "ngu dan": "fisherman", "dau bep": "chef cook",
+    "ca si": "singer on stage", "dien vien": "actor", "nghe si": "artist",
+    "vu cong": "dancer", "khan gia": "audience spectators", "trong tai": "referee",
+    "cau thu": "football soccer player", "van dong vien": "athlete",
+    # Động vật
     "voi": "elephant", "cho": "dog", "meo": "cat", "trau": "buffalo",
     "ngua": "horse", "ho": "tiger", "khi": "monkey", "chim": "bird",
-    "ca": "fish", "bo": "cow", "de": "goat", "lon": "pig",
-    # hành động
-    "noi": "speak", "noi chuyen": "talk", "hat": "sing", "nhay": "dance",
-    "chay": "run", "di": "walk", "ngoi": "sit", "dam": "stomp",
-    "nhay": "jump", "an": "eat", "uong": "drink", "choi": "play",
-    "lam": "do", "cam": "hold", "cuoi": "smile", "khoc": "cry",
-    "ngu": "sleep", "doc": "read", "viet": "write", "xem": "watch",
-    "nghe": "listen", "chup": "take", "quay": "film", "dua": "hug",
-    "vet": "wave", "chi": "point", "dem": "carry",
-    # địa điểm / cảnh
-    "nha": "house", "cong": "factory", "truong": "school",
-    "benh": "hospital", "cho": "market", "cua hang": "shop",
-    "cong vien": "park", "bien": "beach", "nui": "mountain",
-    "song": "river", "duong": "road", "san": "field", "san khau": "stage",
-    "san van dong": "stadium", "cho": "square", "duong pho": "street",
-    # màu sắc
-    "mau": "color", "do": "red", "xanh": "green", "vang": "yellow", "trang": "white",
+    "ca": "fish", "bo": "cow", "de": "goat", "lon": "pig", "heo": "pig",
+    "ga": "chicken", "vit": "duck", "ran": "snake", "ca sau": "crocodile",
+    # Hành động / Hoạt động
+    "noi": "speak", "noi chuyen": "talk", "phong van": "interview",
+    "thuyet trinh": "giving presentation", "phat bieu": "giving speech",
+    "hat": "sing", "ca hat": "singing", "nhay": "dance", "nhay mua": "dancing",
+    "chay": "run", "chay bo": "jogging", "di": "walk", "di bo": "walking",
+    "ngoi": "sit", "dung": "stand", "dam": "stomp", "nhay len": "jump",
+    "an": "eat", "an uong": "eating", "uong": "drink", "choi": "play",
+    "lam": "do", "cam": "hold", "nam": "hold", "cuoi": "smile", "khoc": "cry",
+    "ngu": "sleep", "doc": "read", "viet": "write", "xem": "watch", "nhin": "look",
+    "nghe": "listen", "chup": "take photo", "quay": "film", "chup anh": "taking photo",
+    "quay phim": "filming", "dua": "hug", "om": "hug embrace", "bat tay": "handshake",
+    "cui chao": "bowing", "vo tay": "clapping", "vay tay": "waving",
+    "chi": "point", "dem": "carry", "khieng": "carry", "vac": "carry",
+    "lai xe": "driving", "chay xe": "riding driving", "dap xe": "cycling",
+    "qua duong": "crossing street", "bang qua duong": "crossing street",
+    "cheo thuyen": "rowing boat", "cau ca": "fishing", "tha luoi": "casting fishing net",
+    "kham benh": "examining patient", "tiem thuoc": "giving injection", "phau thuat": "surgery",
+    "chua chay": "extinguishing fire", "dap lua": "putting out fire", "cuu ho": "rescuing",
+    "bat giu": "arresting", "truy duoi": "chasing", "kham xet": "searching",
+    "mua sam": "shopping", "ban hang": "selling goods", "trao giai": "awarding trophy",
+    "da bong": "playing football", "tap gym": "workout gym",
+    # Phương tiện giao thông
+    "xe": "vehicle", "oto": "car", "xe hoi": "car", "xe oto": "car automobile",
+    "xe may": "motorbike scooter", "xe moto": "motorcycle", "xe tay ga": "scooter",
+    "xe om": "motorbike taxi", "xe dap": "bicycle", "xe dap dien": "electric bicycle",
+    "xe ba gac": "three-wheeled cargo motorcycle", "xe xich lo": "cycle rickshaw cyclo",
+    "xe cap cuu": "ambulance", "xe cuu thuong": "ambulance", "xe cuu hoa": "fire engine truck",
+    "xe canh sat": "police patrol car", "xe taxi": "taxi cab",
+    "xe buyt": "city bus", "xe bus": "bus", "xe khach": "passenger coach bus",
+    "xe tai": "cargo truck", "xe container": "container trailer truck",
+    "may bay": "airplane", "may bay truc thang": "helicopter", "truc thang": "helicopter",
+    "tau hoa": "train", "tau lua": "train", "metro": "metro subway",
+    "thuyen": "boat", "tau": "ship", "tau thuy": "ship", "cano": "speed motorboat",
+    "thuyen buom": "sailboat", "pha": "ferry", "ghe": "small wooden boat", "xuong": "small canoe",
+    # Trang phục & Phụ kiện
+    "ao": "shirt", "ao dai": "traditional Vietnamese Ao Dai dress",
+    "ao ba ba": "traditional Vietnamese Ao Ba Ba shirt",
+    "ao so mi": "buttoned shirt", "ao thun": "t-shirt", "ao phong": "t-shirt",
+    "ao khoac": "jacket coat", "ao vest": "suit jacket", "ao len": "sweater",
+    "ao mua": "raincoat", "ao phan quang": "reflective vest", "ao blouse": "medical lab coat",
+    "dong phuc": "uniform", "quan": "pants", "quan jean": "jeans", "quan bo": "jeans",
+    "quan dui": "shorts", "quan short": "shorts", "vay": "skirt", "dam": "dress",
+    "non": "hat", "mu": "hat", "non la": "traditional Vietnamese conical leaf hat",
+    "mu bao hiem": "motorcycle helmet", "non bao hiem": "safety helmet",
+    "mu luoi trai": "cap", "khau trang": "face mask", "kinh": "glasses",
+    "kinh ram": "sunglasses", "kinh mat": "glasses", "gang tay": "gloves",
+    "giay": "shoes", "dep": "sandals", "ca vat": "necktie", "balo": "backpack", "tui": "bag",
+    # Địa điểm / Bối cảnh / Công trình
+    "nha": "house", "toa nha": "building", "cao oc": "skyscraper",
+    "truong quay": "television news studio", "phong thu": "studio",
+    "phong hop": "meeting room", "hoi truong": "auditorium hall", "san khau": "stage",
+    "benh vien": "hospital", "phong kham": "clinic", "nha thuoc": "pharmacy",
+    "truong": "school", "truong hoc": "school", "lop hoc": "classroom", "thu vien": "library",
+    "cho": "market", "cho noi": "floating river market", "sieu thi": "supermarket",
+    "trung tam thuong mai": "shopping mall", "cua hang": "shop",
+    "quan an": "restaurant", "quan ca phe": "coffee shop", "khach san": "hotel",
+    "nha tho": "cathedral church", "chua": "buddhist pagoda temple",
+    "nga tu": "street intersection", "nga ba": "three-way junction",
+    "vong xoay": "roundabout", "cau vuot": "overpass flyover bridge",
+    "ham chui": "underpass tunnel", "cau": "bridge", "via he": "sidewalk",
+    "duong": "road", "duong pho": "street", "lan duong": "traffic lane",
+    "ben xe": "bus station", "san bay": "airport", "ga tau": "railway station", "ben cang": "harbor port",
+    "cong vien": "park garden", "quang truong": "city square", "san van dong": "sports stadium",
+    "song": "river", "dong song": "river", "bien": "beach ocean", "bai bien": "beach",
+    "dong lua": "rice paddy field", "canh dong": "field", "nui": "mountain", "rung": "forest",
+    # Thời tiết / Sự cố / Hiện tượng
+    "ngap nuoc": "flooded street with water", "ngap lut": "flood flooding",
+    "trieu cuong": "high tide flooding", "mua": "rain", "mua bao": "storm rain",
+    "bao": "typhoon storm", "sam set": "lightning",
+    "khoi lua": "smoke and fire", "dam chay": "building fire blaze", "chay nha": "house fire",
+    "hoa hoan": "fire incident", "khoi den": "black smoke",
+    "tai nan": "traffic accident collision", "tai nan giao thong": "traffic crash accident",
+    "ket xe": "traffic jam congestion", "un tac": "traffic congestion", "dong duc": "crowded",
+    "ban ngay": "daytime daylight", "ban dem": "nighttime darkness", "hoang hon": "sunset", "binh minh": "sunrise",
+    # Màu sắc
+    "mau": "color", "do": "red", "xanh": "green", "xanh duong": "blue",
+    "xanh bien": "blue", "xanh la": "green", "vang": "yellow", "trang": "white",
     "den": "black", "tim": "purple", "cam": "orange", "hong": "pink",
     "nau": "brown", "xam": "gray",
-    # đồ vật
+    # Đồ vật & Văn bản
     "nuoc": "water", "lua": "fire", "bong": "ball", "sach": "book",
-    "dien thoai": "phone", "may tinh": "computer", "tui": "bag",
-    "ao": "shirt", "quan": "pants", "giay": "shoes", "non": "hat",
+    "dien thoai": "phone", "may tinh": "computer", "ti vi": "television TV",
     "ban": "table", "ghe": "chair", "cua": "door", "cua so": "window",
-    "xe": "vehicle", "oto": "car", "xe may": "motorbike",
-    "may bay": "airplane", "tau": "train", "thuyen": "boat",
-    # sự kiện / thể thao
-    "video": "video", "phim": "film", "su kien": "event", "le": "ceremony",
-    "trao giai": "award", "hoi nghi": "conference", "the thao": "sport",
-    "banh": "ball", "bong da": "football", "cau long": "badminton",
-    "tennis": "tennis", "boi": "swim", "dua": "race", "thi": "compete",
-    "tap": "practice", "huan luyen": "train", "chien thang": "win",
-    "that bai": "lose", "ghi ban": "score", "van dong": "athlete",
-    "khi leu": "clown", "nhac cong": "orchestra", "ca si": "singer",
-    "khan gia": "audience", "dao dien": "director", "dien vien": "actor",
-    "hoa mi": "flower", "cay": "tree", "bong hoa": "flower",
+    "cay": "tree", "hoa": "flower", "la": "leaf", "co": "grass",
+    "bien bao": "traffic road sign", "bang hieu": "storefront sign",
+    "bien so xe": "license plate", "logo": "logo emblem", "dong chu": "written text",
 }
 
 # Cụm truy vấn thường gặp phải được dịch theo cả nghĩa, không ghép từng từ.
-# Đặc biệt hữu ích cho OCR/textual KIS (biển hiệu, bảng chỉ dẫn, logo).
 _FIXED_PHRASES: list[tuple[str, str]] = [
-    ("xanh duong", "blue"),
-    ("xanh la cay", "green"),
-    ("xanh la", "green"),
-    ("bong den", "lamp"),
     ("hinh anh tam bang co chu", "an image of a sign with the text"),
     ("tam bang co chu", "a sign with the text"),
+    ("bang hieu co chu", "a storefront sign with the text"),
+    ("bien bao co chu", "a traffic sign with the text"),
     ("bang co chu", "a sign with the text"),
+    ("bien co chu", "a sign with the text"),
     ("co chu", "with the text"),
+    ("dong chu tren ao", "text written on shirt"),
+    ("dong chu tren xe", "text written on vehicle"),
+    ("dong chu", "written text"),
+    ("chu viet", "written text"),
     ("hinh anh", "an image of"),
     ("tim hinh anh", "find an image of"),
     ("tim video", "find a video of"),
+    ("doan video", "a video clip showing"),
+    ("canh quay", "a scene showing"),
+    ("trong truong quay", "inside news studio"),
+    ("tren duong pho", "on the city street"),
+    ("ngoai duong", "on the street"),
 ]
 
 
@@ -507,6 +584,7 @@ def offline_decompose_modalities(query_text: str) -> ModalityDecomposition:
     """Deterministic rule-based modality decomposition when LLM is unavailable."""
     text = (query_text or "").strip()
     text_lower = text.lower()
+    translated_vis = offline_translate(text)
 
     # Extract quoted text if any
     quotes = _BRACKET_RE.findall(text)
@@ -516,6 +594,7 @@ def offline_decompose_modalities(query_text: str) -> ModalityDecomposition:
     ocr_keywords = [
         "chữ", "biển", "bảng", "logo", "text", "banner", "sign",
         "tấm bảng", "tiêu đề", "dòng chữ", "áo số", "jersey", "tên hiệu",
+        "ghi chữ", "có chữ", "biển hiệu", "bảng hiệu", "khẩu hiệu",
     ]
     has_ocr_cue = bool(quotes) or any(kw in text_lower for kw in ocr_keywords)
 
@@ -523,14 +602,15 @@ def offline_decompose_modalities(query_text: str) -> ModalityDecomposition:
     asr_keywords = [
         "phát thanh viên", "nói", "nói rằng", "thông báo", "bản tin",
         "lời thoại", "phỏng vấn", "hát", "giọng", "speech", "saying",
-        "dialogue", "anchor", "tuyên bố", "phát biểu",
+        "dialogue", "anchor", "tuyên bố", "phát biểu", "kể về", "chia sẻ",
+        "nói về", "trò chuyện", "thảo luận",
     ]
     has_asr_cue = any(kw in text_lower for kw in asr_keywords)
 
     if has_ocr_cue and not has_asr_cue:
         ocr_q = quoted_str if quoted_str else text
         return ModalityDecomposition(
-            visual_query=text,
+            visual_query=translated_vis,
             ocr_query=ocr_q,
             asr_query="",
             w_vis=0.35,
@@ -540,7 +620,7 @@ def offline_decompose_modalities(query_text: str) -> ModalityDecomposition:
         )
     elif has_asr_cue and not has_ocr_cue:
         return ModalityDecomposition(
-            visual_query=text,
+            visual_query=translated_vis,
             ocr_query="",
             asr_query=text,
             w_vis=0.35,
@@ -550,7 +630,7 @@ def offline_decompose_modalities(query_text: str) -> ModalityDecomposition:
         )
     elif has_ocr_cue and has_asr_cue:
         return ModalityDecomposition(
-            visual_query=text,
+            visual_query=translated_vis,
             ocr_query=quoted_str or text,
             asr_query=text,
             w_vis=0.30,
@@ -560,13 +640,13 @@ def offline_decompose_modalities(query_text: str) -> ModalityDecomposition:
         )
     else:
         return ModalityDecomposition(
-            visual_query=text,
+            visual_query=translated_vis,
             ocr_query=text,
             asr_query=text,
             w_vis=0.60,
             w_ocr=0.20,
             w_asr=0.20,
-            reason="Default visual-dominant multimodal query.",
+            reason="Default visual-dominant multimodal query with translated English visual text.",
         )
 
 

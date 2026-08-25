@@ -99,3 +99,25 @@ def test_translation_schema_parses_noisy_output() -> None:
     noisy = '<think>...</think>\n```json\n{"text": "A red speaker giving a speech"}\n```'
     parsed = _strip_to_json(noisy)
     assert Translation.model_validate_json(parsed).text == "A red speaker giving a speech"
+
+
+def test_offline_translation_handles_aic_vietnamese_phrases() -> None:
+    from aic2026.agent.translator import offline_translate
+
+    t1 = offline_translate("Phát thanh viên thời sự trong trường quay")
+    assert "news anchor in studio" in t1.lower()
+
+    t2 = offline_translate("Xe cứu thương hú còi chạy trên đường phố")
+    assert "ambulance" in t2.lower()
+
+    t3 = offline_translate("Người phụ nữ mặc áo dài đội nón lá")
+    assert "ao dai" in t3.lower() or "dress" in t3.lower()
+
+
+def test_offline_decompose_modalities_translates_visual_query() -> None:
+    from aic2026.agent.translator import offline_decompose_modalities
+
+    decomp = offline_decompose_modalities("Phát thanh viên nói về bão ở Hà Nội")
+    assert "news anchor in studio" in decomp.visual_query.lower()
+    assert decomp.w_asr > decomp.w_ocr
+    assert "Phát thanh viên nói về bão ở Hà Nội" in decomp.asr_query
