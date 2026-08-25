@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import urllib.parse
+from collections import defaultdict
 from pathlib import Path
 
 import httpx
