@@ -586,96 +586,141 @@ def show_video_dialog(
             )
 
         # -------------------------------------------------------------
-        # Live Frame Tracker Card & Nút Bấm Copy Chuột Siêu Tốc
+        # Live Frame Tracker Card & Nút Bấm Copy Chuột Siêu Tốc (Iframe thuần, 0 lag)
         # -------------------------------------------------------------
-        hud_btn_html = f"""<div style="background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%); border: 2px solid #6366f1; border-radius: 12px; padding: 14px 18px; margin: 10px 0; box-shadow: 0 6px 18px rgba(0,0,0,0.45);">
-<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
-<div>
-<div style="font-size: 0.75rem; color: #a5b4fc; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px;">⚡ FRAME ĐANG PHÁT HIỆN TẠI (LIVE TRACKER)</div>
-<div style="display: flex; align-items: baseline; gap: 8px; margin-top: 4px;">
-<span style="font-size: 1rem; color: #cbd5e1; font-weight: 600;">Frame:</span>
-<span id="live-frame-display" style="font-size: 1.85rem; font-weight: 900; color: #fbbf24; font-family: monospace; background: rgba(0,0,0,0.55); padding: 2px 10px; border-radius: 6px; border: 1px solid rgba(251,191,36,0.3);">{current_fid}</span>
-<span id="live-time-display" style="font-size: 0.95rem; color: #94a3b8; font-weight: 500;">({format_timestamp(ts)})</span>
+        tracker_html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
+body {{ background: transparent; overflow: hidden; }}
+.card {{
+    background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%);
+    border: 2px solid #6366f1;
+    border-radius: 10px;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}}
+.title {{ font-size: 0.72rem; color: #a5b4fc; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; }}
+.frame-row {{ display: flex; align-items: baseline; gap: 8px; margin-top: 2px; }}
+.frame-label {{ font-size: 0.9rem; color: #cbd5e1; font-weight: 600; }}
+.frame-val {{ font-size: 1.55rem; font-weight: 900; color: #fbbf24; font-family: monospace; background: rgba(0,0,0,0.55); padding: 1px 8px; border-radius: 6px; border: 1px solid rgba(251,191,36,0.3); }}
+.time-val {{ font-size: 0.85rem; color: #94a3b8; font-weight: 500; }}
+.btn-copy {{
+    background: linear-gradient(135deg, #e11d48 0%, #be123c 100%);
+    color: white;
+    border: none;
+    padding: 10px 18px;
+    border-radius: 8px;
+    font-weight: 800;
+    font-size: 0.95rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    box-shadow: 0 4px 12px rgba(225, 29, 72, 0.4);
+    transition: transform 0.1s, background 0.2s;
+}}
+.btn-copy:active {{ transform: scale(0.96); }}
+</style>
+</head>
+<body>
+<div class="card">
+    <div>
+        <div class="title">⚡ FRAME ĐANG PHÁT HIỆN TẠI (LIVE TRACKER)</div>
+        <div class="frame-row">
+            <span class="frame-label">Frame:</span>
+            <span id="live-frame" class="frame-val">{current_fid}</span>
+            <span id="live-time" class="time-val">({format_timestamp(ts)})</span>
+        </div>
+    </div>
+    <button class="btn-copy" id="btn-copy" onclick="doCopy()">
+        <span style="font-size: 1.1rem;">📋</span>
+        <span id="btn-text">BẤM COPY FRAME NÀY</span>
+    </button>
 </div>
-</div>
-<div style="display: flex; gap: 8px; flex-wrap: wrap;">
-<button id="btn-click-copy-frame"
-        type="button"
-        onclick="
-            try {{
-                const pDoc = window.parent ? window.parent.document : document;
-                const v = pDoc.querySelector('div[data-testid=\\'stDialog\\'] video') || pDoc.querySelector('video') || document.querySelector('video');
-                const cur = v ? (v.currentTime || 0) : {ts};
-                const fid = Math.round(cur * 25.0);
-                const vid = '{html.escape(video_id)}';
-                const copyText = vid ? (vid + ', ' + fid) : String(fid);
 
-                if (navigator.clipboard && navigator.clipboard.writeText) {{
-                    navigator.clipboard.writeText(copyText).catch(() => {{}});
-                }}
-                const ta = document.createElement('textarea');
-                ta.value = copyText;
-                document.body.appendChild(ta);
-                ta.select();
-                document.execCommand('copy');
-                ta.remove();
+<script>
+const vid = {json.dumps(video_id)};
+const fallbackTs = {ts};
 
-                const badge = pDoc.getElementById('live-frame-display') || document.getElementById('live-frame-display');
-                if (badge) {{ badge.innerText = String(fid); badge.style.color = '#34d399'; }}
-                const btnTxt = document.getElementById('copy-btn-text');
-                if (btnTxt) {{ btnTxt.innerText = '✅ ĐÃ COPY: ' + fid; }}
-                setTimeout(() => {{ if (btnTxt) btnTxt.innerText = 'BẤM COPY FRAME NÀY'; }}, 3000);
+function getVideo() {{
+    try {{
+        const pDoc = window.parent.document;
+        const dlg = pDoc.querySelector('div[data-testid="stDialog"]') || pDoc.body;
+        return dlg.querySelector('video') || pDoc.querySelector('video');
+    }} catch(e) {{ return null; }}
+}}
 
-                let hud = pDoc.getElementById('active-frame-hud');
-                if (!hud) {{
-                    hud = pDoc.createElement('div');
-                    hud.id = 'active-frame-hud';
-                    pDoc.body.appendChild(hud);
-                }}
-                hud.innerHTML = '<div style=\\'position:fixed; top:60px; left:50%; transform:translateX(-50%); z-index:9999999; background:linear-gradient(135deg,#0f172a,#1e1b4b); color:#fff; padding:14px 24px; border-radius:12px; box-shadow:0 12px 35px rgba(0,0,0,0.6); border:2px solid #34d399; display:flex; align-items:center; gap:16px; font-family:sans-serif; min-width:340px;\\'><div style=\\'font-size:2rem;\\'>🎯</div><div><div style=\\'font-size:0.75rem; color:#a5b4fc; font-weight:bold;\\'>ĐÃ COPY THÀNH CÔNG</div><div style=\\'font-size:1.3rem; font-weight:bold; margin-top:2px;\\'>Frame: <span style=\\'color:#fbbf24; font-size:1.6rem; font-family:monospace;\\'>' + fid + '</span> · <span style=\\'color:#67e8f9;\\'>' + vid + '</span></div><div style=\\'font-size:0.85rem; color:#cbd5e1;\\'>⏱️ Mốc: ' + cur.toFixed(2) + 's (Đã copy vào Clipboard)</div></div><button onclick=\\'this.parentElement.parentElement.remove()\\' style=\\'background:transparent; color:#94a3b8; border:none; font-size:1.4rem; cursor:pointer; margin-left:auto;\\'>✕</button></div>';
-                setTimeout(() => {{ if (hud) hud.remove(); }}, 6000);
-            }} catch(err) {{
-                alert('Lỗi copy: ' + err);
-            }}
-        "
-        style="background: linear-gradient(135deg, #e11d48 0%, #be123c 100%); color: white; border: none; padding: 12px 20px; border-radius: 8px; font-weight: 800; font-size: 1rem; cursor: pointer; display: flex; align-items: center; gap: 8px; box-shadow: 0 4px 14px rgba(225, 29, 72, 0.45); transition: transform 0.1s;">
-    <span style="font-size: 1.2rem;">📋</span>
-    <span id="copy-btn-text">BẤM COPY FRAME NÀY</span>
-</button>
-</div>
-</div>
-</div>"""
-        st.markdown(hud_btn_html, unsafe_allow_html=True)
+function pad(n) {{ return String(n).padStart(2, '0'); }}
+function fmt(sec) {{
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    const ms = Math.floor((sec % 1) * 100);
+    return pad(m) + ':' + pad(s) + '.' + pad(ms);
+}}
 
-        # Iframe background runner cho Live Counter
-        components.html(
-            f"""<script>
-            function pad(n) {{ return String(n).padStart(2, '0'); }}
-            function fmt(sec) {{
-                const m = Math.floor(sec / 60);
-                const s = Math.floor(sec % 60);
-                const ms = Math.floor((sec % 1) * 100);
-                return pad(m) + ':' + pad(s) + '.' + pad(ms);
-            }}
-            setInterval(() => {{
-                try {{
-                    const pDoc = window.parent.document;
-                    const dialog = pDoc.querySelector('div[data-testid="stDialog"]') || pDoc.body;
-                    const v = dialog.querySelector('video') || pDoc.querySelector('video');
-                    if (v && !v.paused) {{
-                        const cur = v.currentTime || 0;
-                        const fid = Math.round(cur * 25.0);
-                        const b = pDoc.getElementById('live-frame-display');
-                        const tb = pDoc.getElementById('live-time-display');
-                        if (b) b.innerText = String(fid);
-                        if (tb) tb.innerText = '(' + fmt(cur) + ')';
-                    }}
-                }} catch(e) {{}}
-            }}, 150);
-            </script>""",
-            height=0,
-            width=0,
-        )
+function update() {{
+    const v = getVideo();
+    if (!v) return;
+    const cur = v.currentTime || 0;
+    const fid = Math.round(cur * 25.0);
+    const fEl = document.getElementById('live-frame');
+    const tEl = document.getElementById('live-time');
+    if (fEl) fEl.innerText = String(fid);
+    if (tEl) tEl.innerText = '(' + fmt(cur) + ')';
+}}
+
+function doCopy() {{
+    const v = getVideo();
+    const cur = v ? (v.currentTime || 0) : fallbackTs;
+    const fid = Math.round(cur * 25.0);
+    const copyTxt = vid ? (vid + ', ' + fid) : String(fid);
+
+    let copied = false;
+    try {{
+        const ta = window.parent.document.createElement('textarea');
+        ta.value = copyTxt;
+        window.parent.document.body.appendChild(ta);
+        ta.select();
+        copied = window.parent.document.execCommand('copy');
+        ta.remove();
+    }} catch(e) {{}}
+
+    if (!copied && navigator.clipboard && navigator.clipboard.writeText) {{
+        navigator.clipboard.writeText(copyTxt).catch(() => {{}});
+    }}
+
+    const btn = document.getElementById('btn-copy');
+    const btnTxt = document.getElementById('btn-text');
+    if (btnTxt) btnTxt.innerText = '✅ ĐÃ COPY: ' + fid;
+    if (btn) btn.style.background = '#059669';
+
+    setTimeout(() => {{
+        if (btnTxt) btnTxt.innerText = 'BẤM COPY FRAME NÀY';
+        if (btn) btn.style.background = 'linear-gradient(135deg, #e11d48 0%, #be123c 100%)';
+    }}, 2500);
+}}
+
+function setup() {{
+    const v = getVideo();
+    if (v) {{
+        v.addEventListener('timeupdate', update);
+        v.addEventListener('seeked', update);
+        v.addEventListener('play', update);
+        v.addEventListener('pause', update);
+    }}
+}}
+setTimeout(setup, 200);
+setInterval(update, 200);
+</script>
+</body>
+</html>"""
+        components.html(tracker_html, height=75)
 
         # Hộp copy dự phòng chuẩn BTC trực tiếp trên Streamlit
         st.text_input("📋 Chuỗi nộp bài chuẩn BTC (Video, Frame):", value=f"{video_id}, {current_fid}", key=f"txt_cur_val_{video_id}_{current_fid}")
@@ -822,40 +867,10 @@ def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
                 unsafe_allow_html=True,
             )
 
-            # Shot timeline context strip popover
-            video_kf_map = load_video_keyframes(manifest_path)
-            all_v_frames = video_kf_map.get(item.video_id, [])
-            if len(all_v_frames) > 1:
-                with st.popover(f"🎞️ Keyframes ({len(all_v_frames)})", use_container_width=True):
-                    st.caption(f"**Video:** `{item.video_id}` (đang xem frame `{item.frame_id}`)")
-                    f_idx = all_v_frames.index(item.frame_id) if item.frame_id in all_v_frames else 0
-                    start_i = max(0, f_idx - 3)
-                    end_i = min(len(all_v_frames), f_idx + 4)
-                    strip = all_v_frames[start_i:end_i]
-                    t_cols = st.columns(len(strip))
-                    for c_pos, fid in enumerate(strip):
-                        sp = event_keyframe_file(item.video_id, fid, lookup, root)
-                        with t_cols[c_pos]:
-                            if sp and sp.exists():
-                                st.image(str(sp), use_container_width=True)
-                            else:
-                                st.caption("No img")
-                            is_curr = fid == item.frame_id
-                            st.caption(f"{'👉 ' if is_curr else ''}`{fid}`")
-                            if st.button("🎬", key=f"strip_play_{nonce}_{idx}_{fid}", help=f"Phát video tại frame {fid}", use_container_width=True):
-                                show_video_dialog(
-                                    video_id=item.video_id,
-                                    initial_frame_id=fid,
-                                    manifest_path=manifest_path,
-                                    keyframes_root=root,
-                                    videos_root=videos_root,
-                                    map_dir=map_dir,
-                                )
-
             # Nút Xem Video & Checkbox chọn
             c_vid, c_chk = st.columns([3, 1], gap="small")
             with c_vid:
-                if st.button(f"🎬 Video ({format_timestamp(ts)})", key=f"btn_v_{nonce}_{idx}", use_container_width=True, help=f"Mở video {item.video_id} tại {format_timestamp(ts)}"):
+                if st.button(f"🎬 Video ({format_timestamp(ts)})", key=f"btn_v_{nonce}_{idx}", use_container_width=True, help=f"Mở video {item.video_id} tại {format_timestamp(ts)} & duyệt keyframes"):
                     show_video_dialog(
                         video_id=item.video_id,
                         initial_frame_id=item.frame_id,
