@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import html
 import json
 import urllib.parse
@@ -436,6 +437,197 @@ def build_btc_csv(query: Query, candidates: list[Candidate], selected_idx: list[
     return "\n".join(csv_row(query, c) for c in picked)
 
 
+def resolve_video_file(video_id: str, custom_root: str | Path | None = None) -> Path | None:
+    """Tìm file video .mp4 trên đĩa cho video_id."""
+    clean_vid = video_id.strip()
+    candidates: list[Path] = []
+
+    roots = []
+    if custom_root:
+        roots.append(Path(custom_root))
+    roots.extend([
+        Path("data/raw/Videos"),
+        Path("data/extracted/Videos"),
+        Path(r"D:\bachkhoa\ai_challenge\data\extracted\Videos"),
+        Path(r"D:\bachkhoa\ai_challenge\data\raw\Videos"),
+        Path("data/Videos"),
+        Path.cwd() / "data" / "raw" / "Videos",
+    ])
+
+    for r in roots:
+        for ext in (".mp4", ".MP4", ".mkv", ".avi", ".mov"):
+            candidates.append(r / f"{clean_vid}{ext}")
+            candidates.append(r / clean_vid / f"{clean_vid}{ext}")
+            candidates.append(r / f"{clean_vid.lower()}{ext}")
+
+    for c in candidates:
+        if c.exists() and c.is_file():
+            return c
+    return None
+
+
+def format_timestamp(seconds: float) -> str:
+    """Định dạng số giây thành chuỗi mm:ss.xx."""
+    m = int(seconds // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds - int(seconds)) * 100))
+    return f"{m:02d}:{s:02d}.{ms:02d}"
+
+
+@st.cache_data(show_spinner=False)
+def load_all_pts_maps(map_dir_str: str | None) -> dict[str, dict[int, float]]:
+    """Cache toàn bộ map-keyframes CSVs để truy xuất timestamp tức thì."""
+    if not map_dir_str:
+        return {}
+    p = Path(map_dir_str)
+    if not p.exists():
+        return {}
+    all_pts: dict[str, dict[int, float]] = {}
+    csv_files = list(p.glob("*.csv"))
+    if (p / "map-keyframes").exists():
+        csv_files.extend(list((p / "map-keyframes").glob("*.csv")))
+    for cf in csv_files:
+        vid = cf.stem
+        pts_map = {}
+        try:
+            with cf.open(encoding="utf-8") as fh:
+                reader = csv.DictReader(fh)
+                for row in reader:
+                    f_idx = row.get("frame_idx")
+                    pts = row.get("pts_time")
+                    if f_idx and pts:
+                        try:
+                            pts_map[int(f_idx)] = float(pts)
+                        except ValueError:
+                            pass
+            if pts_map:
+                all_pts[vid] = pts_map
+        except Exception:
+            pass
+    return all_pts
+
+
+def get_frame_timestamp(
+    video_id: str,
+    frame_id: int,
+    map_dir: str | Path | None = None,
+    default_fps: float = 25.0,
+) -> float:
+    """Lấy mốc thời gian (giây) của frame_id trong video_id."""
+    map_dir_str = str(map_dir) if map_dir else "data/raw/map-keyframes"
+    pts_cache = load_all_pts_maps(map_dir_str)
+    if video_id in pts_cache and frame_id in pts_cache[video_id]:
+        return pts_cache[video_id][frame_id]
+
+    for fallback_dir in (
+        "data/raw/map-keyframes",
+        "data/extracted/map-keyframes",
+        r"D:\bachkhoa\ai_challenge\data\extracted\map-keyframes",
+    ):
+        f_cache = load_all_pts_maps(fallback_dir)
+        if video_id in f_cache and frame_id in f_cache[video_id]:
+            return f_cache[video_id][frame_id]
+
+    return float(frame_id) / default_fps
+
+
+@st.dialog("🎬 Trình Xem Video & Keyframe Inspector", width="large")
+def show_video_dialog(
+    video_id: str,
+    initial_frame_id: int,
+    manifest_path: str | None = None,
+    keyframes_root: Path | None = None,
+    videos_root: str | None = None,
+    map_dir: str | None = None,
+) -> None:
+    """Modal Dialog phát video tại đúng mốc thời gian của keyframe và duyệt toàn bộ keyframes."""
+    state_key = f"_cur_fid_{video_id}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = initial_frame_id
+    current_fid = st.session_state[state_key]
+
+    v_path = resolve_video_file(video_id, videos_root)
+    ts = get_frame_timestamp(video_id, current_fid, map_dir)
+    lookup = load_keyframe_lookup(manifest_path) if manifest_path else {}
+    video_kf_map = load_video_keyframes(manifest_path)
+    all_frames = video_kf_map.get(video_id, [current_fid])
+    asr_lookup = load_asr_lookup(manifest_path) if manifest_path else {}
+
+    st.markdown(
+        f"### 📹 Video: `{video_id}` &nbsp;|&nbsp; Frame: `{current_fid}` &nbsp;|&nbsp; ⏱️ **{format_timestamp(ts)}** ({ts:.2f}s)"
+    )
+
+    col_player, col_side = st.columns([3, 2], gap="medium")
+
+    with col_player:
+        if v_path and v_path.exists():
+            st.video(str(v_path), start_time=int(ts), autoplay=True)
+            st.caption(f"📁 Video: `{v_path}` (mốc: {format_timestamp(ts)})")
+        else:
+            st.warning(
+                f"⚠️ Không tìm thấy file video `{video_id}.mp4` trong `{videos_root or 'data/raw/Videos'}`.\n\n"
+                f"Hãy đặt file video vào `data/raw/Videos/` để phát video trực tiếp."
+            )
+
+        asr_snippets = asr_lookup.get((video_id, current_fid), [])
+        if asr_snippets:
+            st.info(f"🗣️ **Lời thoại ASR:** {' '.join(asr_snippets)}")
+
+    with col_side:
+        kf_path = event_keyframe_file(video_id, current_fid, lookup, keyframes_root or Path("data/processed"))
+        if kf_path and kf_path.exists():
+            st.image(str(kf_path), use_container_width=True, caption=f"Keyframe: {current_fid} ({format_timestamp(ts)})")
+        else:
+            st.caption("Không có ảnh keyframe")
+
+        # Nút chuyển frame trước / sau trong video
+        if len(all_frames) > 1 and current_fid in all_frames:
+            curr_idx = all_frames.index(current_fid)
+            c_prev, c_next = st.columns(2)
+            with c_prev:
+                if curr_idx > 0:
+                    prev_fid = all_frames[curr_idx - 1]
+                    if st.button(f"⏮️ Frame trước ({prev_fid})", key=f"btn_prev_{video_id}", use_container_width=True):
+                        st.session_state[state_key] = prev_fid
+                        st.rerun()
+            with c_next:
+                if curr_idx < len(all_frames) - 1:
+                    next_fid = all_frames[curr_idx + 1]
+                    if st.button(f"⏭️ Frame sau ({next_fid})", key=f"btn_next_{video_id}", use_container_width=True):
+                        st.session_state[state_key] = next_fid
+                        st.rerun()
+
+    # Section: Keyframe Inspector của video đang mở
+    st.markdown("---")
+    st.markdown(f"#### 🎞️ Toàn bộ Keyframes của video `{video_id}` ({len(all_frames)} keyframes)")
+
+    cols_per_row = 6
+    if len(all_frames) > 60:
+        st.caption(f"Đang hiển thị 60/{len(all_frames)} keyframes (lân cận frame hiện tại)")
+        curr_idx = all_frames.index(current_fid) if current_fid in all_frames else 0
+        start_idx = max(0, curr_idx - 30)
+        end_idx = min(len(all_frames), start_idx + 60)
+        slice_frames = all_frames[start_idx:end_idx]
+    else:
+        slice_frames = all_frames
+
+    for row_start in range(0, len(slice_frames), cols_per_row):
+        row_frames = slice_frames[row_start : row_start + cols_per_row]
+        cols = st.columns(len(row_frames))
+        for c_idx, fid in enumerate(row_frames):
+            with cols[c_idx]:
+                f_ts = get_frame_timestamp(video_id, fid, map_dir)
+                f_path = event_keyframe_file(video_id, fid, lookup, keyframes_root or Path("data/processed"))
+                is_active = (fid == current_fid)
+                if f_path and f_path.exists():
+                    st.image(str(f_path), use_container_width=True)
+                st.caption(f"{'👉 ' if is_active else ''}**`{fid}`**\n({format_timestamp(f_ts)})")
+                if not is_active:
+                    if st.button("▶️ Mở", key=f"kf_jump_{video_id}_{fid}", use_container_width=True):
+                        st.session_state[state_key] = fid
+                        st.rerun()
+
+
 # ---------------------------------------------------------------------------
 # Gallery renderers (với checkbox chọn) — định nghĩa TRƯỚC phần gọi gallery
 # để tránh NameError khi Streamlit thực thi tuần tự từ trên xuống.
@@ -468,10 +660,14 @@ def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
     manifest_path = st.session_state.get("manifest_path")
     asr_lookup = load_asr_lookup(manifest_path) if manifest_path else {}
     lookup = load_keyframe_lookup(manifest_path) if manifest_path else {}
+    map_dir = st.session_state.get("cfg_map_keyframes", "data/raw/map-keyframes")
+    videos_root = st.session_state.get("cfg_videos_root", "data/raw/Videos")
+
     st.subheader(f"Gallery ({len(visible)} ảnh)")
     grid = st.columns(5)
     for pos, (idx, item) in enumerate(visible):
         path = keyframe_file(item, root)
+        ts = get_frame_timestamp(item.video_id, item.frame_id, map_dir)
         with grid[pos % 5]:
             if path and path.exists():
                 st.markdown(f'<div class="gallery-card-container" data-video-id="{html.escape(item.video_id)}">', unsafe_allow_html=True)
@@ -509,7 +705,7 @@ def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
             video_kf_map = load_video_keyframes(manifest_path)
             all_v_frames = video_kf_map.get(item.video_id, [])
             if len(all_v_frames) > 1:
-                with st.popover("🎞️ Dải frame lân cận", use_container_width=True):
+                with st.popover(f"🎞️ Keyframes ({len(all_v_frames)})", use_container_width=True):
                     st.caption(f"**Video:** `{item.video_id}` (đang xem frame `{item.frame_id}`)")
                     f_idx = all_v_frames.index(item.frame_id) if item.frame_id in all_v_frames else 0
                     start_i = max(0, f_idx - 3)
@@ -525,9 +721,30 @@ def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
                                 st.caption("No img")
                             is_curr = fid == item.frame_id
                             st.caption(f"{'👉 ' if is_curr else ''}`{fid}`")
+                            if st.button("🎬", key=f"strip_play_{nonce}_{idx}_{fid}", help=f"Phát video tại frame {fid}", use_container_width=True):
+                                show_video_dialog(
+                                    video_id=item.video_id,
+                                    initial_frame_id=fid,
+                                    manifest_path=manifest_path,
+                                    keyframes_root=root,
+                                    videos_root=videos_root,
+                                    map_dir=map_dir,
+                                )
 
-            # Checkbox chọn nằm DƯỚI CÙNG, cách xa ảnh (tránh bấm nhầm khi lướt).
-            st.checkbox("Chọn", key=f"sel_{nonce}_{idx}", value=(idx in selected), on_change=_toggle, args=(idx, nonce), label_visibility="collapsed")
+            # Nút Xem Video & Checkbox chọn
+            c_vid, c_chk = st.columns([3, 1], gap="small")
+            with c_vid:
+                if st.button(f"🎬 Video ({format_timestamp(ts)})", key=f"btn_v_{nonce}_{idx}", use_container_width=True, help=f"Mở video {item.video_id} tại {format_timestamp(ts)}"):
+                    show_video_dialog(
+                        video_id=item.video_id,
+                        initial_frame_id=item.frame_id,
+                        manifest_path=manifest_path,
+                        keyframes_root=root,
+                        videos_root=videos_root,
+                        map_dir=map_dir,
+                    )
+            with c_chk:
+                st.checkbox("Chọn", key=f"sel_{nonce}_{idx}", value=(idx in selected), on_change=_toggle, args=(idx, nonce), label_visibility="collapsed")
             st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -537,6 +754,8 @@ def _render_trake_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
         lookup = load_keyframe_lookup(manifest_path) if manifest_path else {}
     except (FileNotFoundError, ValueError):
         lookup = {}
+    map_dir = st.session_state.get("cfg_map_keyframes", "data/raw/map-keyframes")
+    videos_root = st.session_state.get("cfg_videos_root", "data/raw/Videos")
 
     st.subheader(f"Gallery TRAKE ({len(visible)} video)")
     for idx, item in visible:
@@ -560,6 +779,7 @@ def _render_trake_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
                     ev_idx = row_start * 4 + col_idx
                     path = event_keyframe_file(item.video_id, frame_id, lookup, root)
                     ev_text = query.events[ev_idx] if ev_idx < len(query.events) else f"Sự kiện {ev_idx + 1}"
+                    ev_ts = get_frame_timestamp(item.video_id, frame_id, map_dir)
                     with col:
                         if path and path.exists():
                             st.markdown('<div class="hero-wrap">', unsafe_allow_html=True)
@@ -567,7 +787,16 @@ def _render_trake_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
                             st.markdown("</div>", unsafe_allow_html=True)
                         else:
                             st.caption("Không có ảnh")
-                        st.caption(f"**#{ev_idx + 1}: {html.escape(ev_text)}**\n`frame {frame_id}`")
+                        st.caption(f"**#{ev_idx + 1}: {html.escape(ev_text)}**\n`frame {frame_id}` ({format_timestamp(ev_ts)})")
+                        if st.button("🎬 Xem", key=f"trake_v_{nonce}_{idx}_{frame_id}", use_container_width=True, help=f"Phát video {item.video_id} tại {format_timestamp(ev_ts)}"):
+                            show_video_dialog(
+                                video_id=item.video_id,
+                                initial_frame_id=frame_id,
+                                manifest_path=manifest_path,
+                                keyframes_root=root,
+                                videos_root=videos_root,
+                                map_dir=map_dir,
+                            )
         nonce = int(st.session_state.get("_query_nonce", 0))
         st.checkbox("Chọn video này", key=f"sel_{nonce}_{idx}", value=(idx in selected), on_change=_toggle, args=(idx, nonce))
         st.divider()
@@ -799,6 +1028,8 @@ with st.expander("Cấu hình nâng cao"):
     st.number_input("QA VLM: Số video giới hạn gửi (vlm_top_videos)", min_value=1, max_value=200, value=20, key="cfg_vlm_top_videos")
     st.number_input("QA VLM: Số thread song song (vlm_max_workers)", min_value=1, max_value=32, value=8, key="cfg_vlm_max_workers")
     st.number_input("QA VLM: Timeout mỗi video (giây)", min_value=10, max_value=600, value=120, key="cfg_vlm_timeout")
+    st.text_input("Root Videos (.mp4)", "data/raw/Videos", key="cfg_videos_root", help="Thư mục chứa các file video gốc .mp4 để phát video trực tiếp.")
+    st.text_input("Thư mục map-keyframes (.csv)", "data/raw/map-keyframes", key="cfg_map_keyframes", help="Thư mục chứa các file CSV ánh xạ frame_idx sang pts_time.")
 
 st.markdown("</div>", unsafe_allow_html=True)  # đóng .topbar
 
@@ -864,8 +1095,8 @@ else:
             unsafe_allow_html=True,
         )
 
-        # Thanh công cụ: lọc video + giới hạn + chọn tất cả
-        col_filter, col_limit, col_all = st.columns([2, 1, 1])
+        # Thanh công cụ: lọc video + xem video top 1 + giới hạn + chọn tất cả
+        col_filter, col_vid_quick, col_limit, col_all = st.columns([2, 1.2, 1, 1])
         with col_filter:
             if query.type == "TRAKE":
                 video_options = ["Tất cả"] + sorted({c.video_id for c in candidates})
@@ -912,9 +1143,30 @@ else:
                         window.filterKeyframes(dropdown.value);
                     }}
                 }}, 100);
+
+                // Phím tắt bàn phím: Nhấn V hoặc K để mở Video & Keyframe Inspector
+                document.addEventListener('keydown', function(e) {{
+                    if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+                    if (e.key === 'v' || e.key === 'V' || e.key === 'k' || e.key === 'K') {{
+                        const btn = document.querySelector('button[id*="btn_quick_vid_top1"]') || document.querySelector('button[id*="btn_v_"]');
+                        if (btn) btn.click();
+                    }}
+                }});
                 </script>
                 """
                 st.markdown(filter_html, unsafe_allow_html=True)
+        with col_vid_quick:
+            st.markdown('<label style="font-weight: bold; color: var(--peg-ink); font-size: 0.85rem; display: block; margin-bottom: 4px;">🎬 Video Top 1 (Phím: V/K)</label>', unsafe_allow_html=True)
+            if candidates and st.button("🎬 Xem Video #1", key="btn_quick_vid_top1", use_container_width=True, help="Mở video & duyệt keyframes của Candidate #1 (Phím tắt: V hoặc K)"):
+                top_cand = candidates[0]
+                show_video_dialog(
+                    video_id=top_cand.video_id,
+                    initial_frame_id=top_cand.frame_id,
+                    manifest_path=st.session_state.get("manifest_path"),
+                    keyframes_root=root,
+                    videos_root=st.session_state.get("cfg_videos_root", "data/raw/Videos"),
+                    map_dir=st.session_state.get("cfg_map_keyframes", "data/raw/map-keyframes"),
+                )
         with col_limit:
             if total <= 1:
                 max_show = total
