@@ -1,41 +1,37 @@
 @echo off
-title PEGASUS - AI Challenge 2026 Launcher
+title PEGASUS AI Challenge 2026
 cd /d "%~dp0"
 
 echo ================================================================
 echo    PEGASUS - Video Retrieval AI Challenge 2026
-echo    Dang khoi dong he thong (Backend ^& Web UI)...
+echo    Dang khoi dong ung dung Web UI...
 echo ================================================================
 echo.
 
-:: 1. Kiem tra va khoi dong FastAPI Backend (Port 8000) trong cua so an
+set "PATH=%PATH%;E:\Anaconda3\Scripts;E:\Anaconda3;%USERPROFILE%\.cargo\bin"
+
+:: 1. Uu tien dung uv run
 where uv >nul 2>&1
 if %errorlevel% equ 0 (
-    echo [*] Dang khoi dong FastAPI Backend (Port 8000)...
-    start "PEGASUS Backend" /min cmd /c "uv run uvicorn aic2026.app.api:app --host 127.0.0.1 --port 8000"
-    timeout /t 2 /nobreak >nul
-    echo [*] Dang khoi dong Streamlit Web UI (Port 8501)...
+    echo [*] Khoi dong bang uv...
     uv run streamlit run src/aic2026/app/ui.py --server.port 8501 --server.headless false
-    goto end
+    goto finish
 )
 
+:: 2. Dung moi truong ao .venv
 if exist ".venv\Scripts\streamlit.exe" (
-    echo [*] Dang khoi dong FastAPI Backend bang .venv...
-    start "PEGASUS Backend" /min cmd /c ".venv\Scripts\uvicorn.exe aic2026.app.api:app --host 127.0.0.1 --port 8000"
-    timeout /t 2 /nobreak >nul
-    echo [*] Dang khoi dong Streamlit Web UI...
+    echo [*] Khoi dong bang .venv...
     .venv\Scripts\streamlit.exe run src/aic2026/app/ui.py --server.port 8501 --server.headless false
-    goto end
+    goto finish
 )
 
-echo [*] Dang khoi dong bang Python he thong...
-start "PEGASUS Backend" /min cmd /c "python -m uvicorn aic2026.app.api:app --host 127.0.0.1 --port 8000"
-timeout /t 2 /nobreak >nul
+:: 3. Dung python he thong
+echo [*] Khoi dong bang python he thong...
 python -m streamlit run src/aic2026/app/ui.py --server.port 8501 --server.headless false
 
-:end
+:finish
 if %errorlevel% neq 0 (
     echo.
-    echo [!] Co loi xay ra khi chay chuong trinh.
+    echo [!] Chuong trinh dung voi ma loi: %errorlevel%
     pause
 )
