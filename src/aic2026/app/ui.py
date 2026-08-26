@@ -769,7 +769,7 @@ setInterval(update, 200);
     end_idx = min(len(all_frames), start_idx + 12)
     slice_frames = all_frames[start_idx:end_idx]
 
-    def _render_kf_row(frames_chunk: list[int]):
+    def _render_kf_row(frames_chunk: list[int], prefix: str = "adj"):
         cols = st.columns(len(frames_chunk))
         for c_idx, fid in enumerate(frames_chunk):
             with cols[c_idx]:
@@ -783,7 +783,7 @@ setInterval(update, 200);
                 c_k1, c_k2 = st.columns(2)
                 with c_k1:
                     if not is_active:
-                        if st.button("▶️", key=f"kf_jump_{video_id}_{fid}", use_container_width=True, help=f"Nhảy video tới frame {fid}"):
+                        if st.button("▶️", key=f"kf_jump_{prefix}_{video_id}_{fid}", use_container_width=True, help=f"Nhảy video tới frame {fid}"):
                             st.session_state[state_key] = fid
                             st.rerun()
                 with c_k2:
@@ -795,12 +795,12 @@ setInterval(update, 200);
                     )
 
     for row_start in range(0, len(slice_frames), cols_per_row):
-        _render_kf_row(slice_frames[row_start : row_start + cols_per_row])
+        _render_kf_row(slice_frames[row_start : row_start + cols_per_row], prefix="adj")
 
     if len(all_frames) > len(slice_frames):
         with st.expander(f"📂 Xem toàn bộ {len(all_frames)} keyframes của video `{video_id}`", expanded=False):
             for row_start in range(0, len(all_frames), cols_per_row):
-                _render_kf_row(all_frames[row_start : row_start + cols_per_row])
+                _render_kf_row(all_frames[row_start : row_start + cols_per_row], prefix="all")
 
 
 # ---------------------------------------------------------------------------
