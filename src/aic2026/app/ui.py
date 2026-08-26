@@ -223,8 +223,20 @@ def run_backend(task_type: str, query: Query, runtime: dict, backend_url: str):
         except json.JSONDecodeError:
             detail = exc.response.text
         raise BackendRequestError(f"Backend trả HTTP {exc.response.status_code}: {detail}") from exc
-    except httpx.RequestError as exc:
-        raise BackendRequestError("Không thể kết nối tới backend. Hãy kiểm tra FastAPI có đang chạy không.") from exc
+    except httpx.RequestError:
+        # Tự động chuyển sang chế độ chạy trực tiếp trong tiến trình (In-process Fallback)
+        try:
+            from aic2026.app.api import RuntimeConfig, TaskRequest, run_task
+            task_req = TaskRequest(
+                query_id=query.query_id,
+                text=query.text,
+                question=query.question,
+                events=query.events,
+                runtime=RuntimeConfig(**runtime) if isinstance(runtime, dict) else runtime,
+            )
+            return run_task(task_type, task_req)
+        except Exception as local_exc:
+            raise BackendRequestError(f"Lỗi khi chạy Agent trực tiếp: {local_exc}") from local_exc
     except (json.JSONDecodeError, ValidationError) as exc:
         raise BackendRequestError("Backend không trả về dữ liệu hợp lệ.") from exc
 
@@ -255,8 +267,19 @@ def run_backend_qa_phase1(query: Query, runtime: dict, backend_url: str):
         except json.JSONDecodeError:
             detail = exc.response.text
         raise BackendRequestError(f"Backend trả HTTP {exc.response.status_code}: {detail}") from exc
-    except httpx.RequestError as exc:
-        raise BackendRequestError("Không thể kết nối tới backend.") from exc
+    except httpx.RequestError:
+        try:
+            from aic2026.app.api import RuntimeConfig, TaskRequest, run_qa_candidates
+            task_req = TaskRequest(
+                query_id=query.query_id,
+                text=query.text,
+                question=query.question,
+                events=query.events,
+                runtime=RuntimeConfig(**runtime) if isinstance(runtime, dict) else runtime,
+            )
+            return run_qa_candidates(task_req)
+        except Exception as local_exc:
+            raise BackendRequestError(f"Lỗi khi chạy QA Phase 1 trực tiếp: {local_exc}") from local_exc
     except (json.JSONDecodeError, ValidationError) as exc:
         raise BackendRequestError("Backend không trả về dữ liệu hợp lệ.") from exc
 
@@ -290,8 +313,18 @@ def run_backend_qa_answers(
         except json.JSONDecodeError:
             detail = exc.response.text
         raise BackendRequestError(f"Backend trả HTTP {exc.response.status_code}: {detail}") from exc
-    except httpx.RequestError as exc:
-        raise BackendRequestError("Không thể kết nối tới backend.") from exc
+    except httpx.RequestError:
+        try:
+            from aic2026.app.api import AnswerRequest, RuntimeConfig, run_qa_answers
+            ans_req = AnswerRequest(
+                question=question,
+                candidates=[c.model_dump() for c in candidates],
+                runtime=RuntimeConfig(**runtime) if isinstance(runtime, dict) else runtime,
+            )
+            raw = run_qa_answers(ans_req)
+            return {int(k): v for k, v in raw.items()}
+        except Exception as local_exc:
+            raise BackendRequestError(f"Lỗi khi chạy QA VLM trực tiếp: {local_exc}") from local_exc
     except (json.JSONDecodeError, ValidationError) as exc:
         raise BackendRequestError("Backend không trả về dữ liệu hợp lệ.") from exc
 
