@@ -56,6 +56,16 @@ DEFAULT_ROOT = _detect_default_path([
     "data/raw/Keyframes",
     "data/processed",
 ])
+DEFAULT_VIDEOS_ROOT = _detect_default_path([
+    r"D:\bachkhoa\ai_challenge\data\extracted\Videos",
+    "data/extracted/Videos",
+    "data/raw/Videos",
+])
+DEFAULT_MAP_KEYFRAMES = _detect_default_path([
+    r"D:\bachkhoa\ai_challenge\data\extracted\map-keyframes",
+    "data/extracted/map-keyframes",
+    "data/raw/map-keyframes",
+])
 DEFAULT_CLIP_MODEL = "ViT-L-14" if "derived" in DEFAULT_FEATURES else "ViT-B-32"
 
 
@@ -446,10 +456,11 @@ def resolve_video_file(video_id: str, custom_root: str | Path | None = None) -> 
     if custom_root:
         roots.append(Path(custom_root))
     roots.extend([
-        Path("data/raw/Videos"),
-        Path("data/extracted/Videos"),
+        Path(DEFAULT_VIDEOS_ROOT),
         Path(r"D:\bachkhoa\ai_challenge\data\extracted\Videos"),
         Path(r"D:\bachkhoa\ai_challenge\data\raw\Videos"),
+        Path("data/extracted/Videos"),
+        Path("data/raw/Videos"),
         Path("data/Videos"),
         Path.cwd() / "data" / "raw" / "Videos",
     ])
@@ -514,15 +525,16 @@ def get_frame_timestamp(
     default_fps: float = 25.0,
 ) -> float:
     """Lấy mốc thời gian (giây) của frame_id trong video_id."""
-    map_dir_str = str(map_dir) if map_dir else "data/raw/map-keyframes"
+    map_dir_str = str(map_dir) if map_dir else DEFAULT_MAP_KEYFRAMES
     pts_cache = load_all_pts_maps(map_dir_str)
     if video_id in pts_cache and frame_id in pts_cache[video_id]:
         return pts_cache[video_id][frame_id]
 
     for fallback_dir in (
-        "data/raw/map-keyframes",
-        "data/extracted/map-keyframes",
+        DEFAULT_MAP_KEYFRAMES,
         r"D:\bachkhoa\ai_challenge\data\extracted\map-keyframes",
+        "data/extracted/map-keyframes",
+        "data/raw/map-keyframes",
     ):
         f_cache = load_all_pts_maps(fallback_dir)
         if video_id in f_cache and frame_id in f_cache[video_id]:
@@ -568,8 +580,8 @@ def show_video_dialog(
             st.caption(f"📁 Video: `{v_path}` (mốc: {format_timestamp(ts)})")
         else:
             st.warning(
-                f"⚠️ Không tìm thấy file video `{video_id}.mp4` trong `{videos_root or 'data/raw/Videos'}`.\n\n"
-                f"Hãy đặt file video vào `data/raw/Videos/` để phát video trực tiếp."
+                f"⚠️ Không tìm thấy file video `{video_id}.mp4` trong `{videos_root or DEFAULT_VIDEOS_ROOT}`.\n\n"
+                f"Hãy kiểm tra lại đường dẫn video trong 'Cấu hình nâng cao'."
             )
 
         # Live Frame Tracker Card & Nút Click Chuột Siêu Tốc
@@ -857,8 +869,8 @@ def _render_frame_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
     manifest_path = st.session_state.get("manifest_path")
     asr_lookup = load_asr_lookup(manifest_path) if manifest_path else {}
     lookup = load_keyframe_lookup(manifest_path) if manifest_path else {}
-    map_dir = st.session_state.get("cfg_map_keyframes", "data/raw/map-keyframes")
-    videos_root = st.session_state.get("cfg_videos_root", "data/raw/Videos")
+    map_dir = st.session_state.get("cfg_map_keyframes", DEFAULT_MAP_KEYFRAMES)
+    videos_root = st.session_state.get("cfg_videos_root", DEFAULT_VIDEOS_ROOT)
 
     st.subheader(f"Gallery ({len(visible)} ảnh)")
     grid = st.columns(5)
@@ -951,8 +963,8 @@ def _render_trake_gallery(query: Query, visible: list[tuple[int, Candidate]], ro
         lookup = load_keyframe_lookup(manifest_path) if manifest_path else {}
     except (FileNotFoundError, ValueError):
         lookup = {}
-    map_dir = st.session_state.get("cfg_map_keyframes", "data/raw/map-keyframes")
-    videos_root = st.session_state.get("cfg_videos_root", "data/raw/Videos")
+    map_dir = st.session_state.get("cfg_map_keyframes", DEFAULT_MAP_KEYFRAMES)
+    videos_root = st.session_state.get("cfg_videos_root", DEFAULT_VIDEOS_ROOT)
 
     st.subheader(f"Gallery TRAKE ({len(visible)} video)")
     for idx, item in visible:
@@ -1225,8 +1237,8 @@ with st.expander("Cấu hình nâng cao"):
     st.number_input("QA VLM: Số video giới hạn gửi (vlm_top_videos)", min_value=1, max_value=200, value=20, key="cfg_vlm_top_videos")
     st.number_input("QA VLM: Số thread song song (vlm_max_workers)", min_value=1, max_value=32, value=8, key="cfg_vlm_max_workers")
     st.number_input("QA VLM: Timeout mỗi video (giây)", min_value=10, max_value=600, value=120, key="cfg_vlm_timeout")
-    st.text_input("Root Videos (.mp4)", "data/raw/Videos", key="cfg_videos_root", help="Thư mục chứa các file video gốc .mp4 để phát video trực tiếp.")
-    st.text_input("Thư mục map-keyframes (.csv)", "data/raw/map-keyframes", key="cfg_map_keyframes", help="Thư mục chứa các file CSV ánh xạ frame_idx sang pts_time.")
+    st.text_input("Root Videos (.mp4)", DEFAULT_VIDEOS_ROOT, key="cfg_videos_root", help="Thư mục chứa các file video gốc .mp4 để phát video trực tiếp.")
+    st.text_input("Thư mục map-keyframes (.csv)", DEFAULT_MAP_KEYFRAMES, key="cfg_map_keyframes", help="Thư mục chứa các file CSV ánh xạ frame_idx sang pts_time.")
 
 st.markdown("</div>", unsafe_allow_html=True)  # đóng .topbar
 
@@ -1361,8 +1373,8 @@ else:
                     initial_frame_id=top_cand.frame_id,
                     manifest_path=st.session_state.get("manifest_path"),
                     keyframes_root=root,
-                    videos_root=st.session_state.get("cfg_videos_root", "data/raw/Videos"),
-                    map_dir=st.session_state.get("cfg_map_keyframes", "data/raw/map-keyframes"),
+                    videos_root=st.session_state.get("cfg_videos_root", DEFAULT_VIDEOS_ROOT),
+                    map_dir=st.session_state.get("cfg_map_keyframes", DEFAULT_MAP_KEYFRAMES),
                 )
         with col_limit:
             if total <= 1:
