@@ -192,6 +192,39 @@ class RetrievalPipeline:
 
         return fused_scores
 
+    def _srrf_fuse(
+        self,
+        ranked_results: list[tuple[np.ndarray, np.ndarray]],
+        k: int | None = 60,
+    ) -> dict[int, float]:
+        r"""Fuse candidate results using Score-Reflected Reciprocal Rank Fusion (SRRF).
+
+        Reference: Paper 2512.12935v1 - Section 4.2.
+        Formula:
+            S_SRRF(f) = \sum_{k=1}^M \frac{\cos(e(q_k), v_f)}{\text{rank}_k(f) + k_rrf}
+
+        Unlike standard RRF which ignores the actual score magnitude (treating a weak
+        match at rank 1 identical to a high-confidence match at rank 1), SRRF scales
+        each contribution by the cosine similarity score, ensuring high precision
+        while fusing multi-facet queries without noisy facet distortion.
+        """
+        k_val = _RRF_K if k is None else max(1, k)
+        fused_scores: dict[int, float] = {}
+
+        for ids, scores in ranked_results:
+            if ids is None or len(ids) == 0:
+                continue
+            for rank, (idx, score) in enumerate(zip(ids, scores)):
+                manifest_idx = int(idx)
+                sim = float(score)
+                # Score-Reflected contribution
+                contribution = sim / (k_val + rank + 1)
+                fused_scores[manifest_idx] = (
+                    fused_scores.get(manifest_idx, 0.0) + contribution
+                )
+
+        return fused_scores
+
     def _candidates_from_scores(
         self,
         scores_by_manifest_idx: dict[int, float],
@@ -430,6 +463,51 @@ class RetrievalPipeline:
             video_ids=video_ids,
         )
 
+        return self.diversify_candidates(
+            candidates=raw_candidates,
+            max_answers=max_answers,
+        )
+
+    def multi_facet_retrieve_raw(
+        self,
+        facet_embeddings: list[np.ndarray],
+        top_frames: int = 500,
+        video_ids: set[str] | None = None,
+        k_rrf: int = 60,
+    ) -> list[Candidate]:
+        r"""Multi-facet visual retrieval using GQE decomposition and SRRF fusion (Tầng 2 & 3).
+
+        Runs parallel/vectorized ANN scans for all 4 facet query vectors:
+            TopCandidates_k = Search(e(q_k)), k in {1, 2, 3, 4}
+        And merges them via Score-Reflected Reciprocal Rank Fusion (SRRF):
+            S_SRRF(f) = \sum_{k=1}^4 \frac{\cos(e(q_k), v_f)}{\text{rank}_k(f) + 60}
+        """
+        if not facet_embeddings:
+            return []
+
+        ranked_results: list[tuple[np.ndarray, np.ndarray]] = []
+        for emb in facet_embeddings:
+            ids, scores = self.search_with_filter(emb, top_frames, video_ids)
+            ranked_results.append((ids, scores))
+
+        fused_scores = self._srrf_fuse(ranked_results, k=k_rrf)
+        return self._candidates_from_scores(fused_scores, limit=top_frames)
+
+    def multi_facet_retrieve(
+        self,
+        facet_embeddings: list[np.ndarray],
+        top_frames: int = 500,
+        max_answers: int = 100,
+        video_ids: set[str] | None = None,
+        k_rrf: int = 60,
+    ) -> list[Candidate]:
+        """Multi-facet visual retrieval followed by per-video diversification."""
+        raw_candidates = self.multi_facet_retrieve_raw(
+            facet_embeddings=facet_embeddings,
+            top_frames=top_frames,
+            video_ids=video_ids,
+            k_rrf=k_rrf,
+        )
         return self.diversify_candidates(
             candidates=raw_candidates,
             max_answers=max_answers,
@@ -850,14 +928,24 @@ class RetrievalPipeline:
 
         fused_scores: dict[int, float] = {}
 
-        # 1. Visual branch
+        # 1. Visual branch (supports GQE Multi-Facet embeddings with SRRF fusion)
         if wv > 0:
-            v_ids, v_scores = self.search_with_filter(text_embedding, top_frames, video_ids)
-            if v_ids.size > 0:
-                v_norm = _norm(v_scores)
-                for rank, (idx, sc) in enumerate(zip(v_ids, v_norm)):
-                    manifest_idx = int(idx)
-                    fused_scores[manifest_idx] = fused_scores.get(manifest_idx, 0.0) + wv * (float(sc) + 1.0 / (60 + rank + 1))
+            if isinstance(text_embedding, list) or (isinstance(text_embedding, np.ndarray) and text_embedding.ndim == 2):
+                facet_list = [np.asarray(e, dtype=np.float32) for e in text_embedding]
+                ranked_results = [self.search_with_filter(emb, top_frames, video_ids) for emb in facet_list]
+                vis_srrf_scores = self._srrf_fuse(ranked_results, k=60)
+                if vis_srrf_scores:
+                    s_vals = np.array(list(vis_srrf_scores.values()), dtype=np.float32)
+                    v_norm = _norm(s_vals)
+                    for (manifest_idx, _), sc in zip(vis_srrf_scores.items(), v_norm):
+                        fused_scores[manifest_idx] = fused_scores.get(manifest_idx, 0.0) + wv * float(sc)
+            else:
+                v_ids, v_scores = self.search_with_filter(text_embedding, top_frames, video_ids)
+                if v_ids.size > 0:
+                    v_norm = _norm(v_scores)
+                    for rank, (idx, sc) in enumerate(zip(v_ids, v_norm)):
+                        manifest_idx = int(idx)
+                        fused_scores[manifest_idx] = fused_scores.get(manifest_idx, 0.0) + wv * (float(sc) + 1.0 / (60 + rank + 1))
 
         # 2. OCR branch
         if wo > 0 and not bm25_index.is_empty:

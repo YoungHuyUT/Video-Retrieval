@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from aic2026.agent.types import ModalityDecomposition
+from aic2026.agent.types import ModalityDecomposition, VisualQueryFacets
 
 if TYPE_CHECKING:
     from aic2026.agent.local_llm import LocalLLM
@@ -64,6 +64,23 @@ _SYSTEM_PROMPT = (
     "verbatim — do not translate, rename, or drop them. "
     "Reply with ONLY a single JSON object of the form {\"text\": \"...\"} "
     "and nothing else — no prose, no markdown, no thinking block."
+)
+
+# Tầng 1 & Tầng 2: LLM Visual Query Formulator & Multi-Facet Decomposition (GQE 2024 / MQVR ECCV 2022)
+_VISUAL_FORMULATOR_SYSTEM_PROMPT = (
+    "You are a Visual Search Expert and Multimodal Query Formulator for a video retrieval system using CLIP/SigLIP.\n"
+    "Given a user search query in Vietnamese or English (which may contain typos or informal descriptions):\n"
+    "1. Fix any typos or spelling mistakes (e.g. 'nột người' -> 'a person', 'đĩa da ngăn' -> 'multi-compartment plate', 'chiec ao' -> 'a shirt').\n"
+    "2. Understand natural contextual meaning (e.g. 'đá quý thô' -> 'rough gemstone', 'mỏ lộ thiên' -> 'open-pit mine quarry', 'phát thanh viên' -> 'news anchor in studio').\n"
+    "3. Use natural visual caption syntax that CLIP/SigLIP vision-language models are most sensitive to.\n"
+    "4. Deconstruct the search query into 4 complementary visual representations to prevent CLIP representation saturation:\n"
+    "   - q_core: High-level visual overview caption summarizing the complete scene.\n"
+    "   - q_entity: Focused on subjects, people, objects, clothing colors, and physical attributes (e.g. 'a man in dark blue suit, a woman in pink-purple headscarf').\n"
+    "   - q_action: Focused on dynamic movements, gestures, actions, and interactions (e.g. 'holding a large rough gemstone close to face to observe').\n"
+    "   - q_scene: Focused on background environment, setting, lighting, and camera viewpoint (e.g. 'panoramic top-down view of a deep multi-tier open-pit mining pit').\n\n"
+    "Preserve every placeholder token of the form <<<KEEP_N>>> exactly and verbatim — do not translate, rename, or drop them.\n"
+    "Reply with ONLY a single JSON object matching the schema:\n"
+    '{"q_core": "...", "q_entity": "...", "q_action": "...", "q_scene": "..."}'
 )
 
 # Prompt dùng khi gộp nhiều phần (text + question + events) vào 1 call.
@@ -132,8 +149,9 @@ def _is_vietnamese(text: str) -> bool:
 
 # Từ điển hạt giống: token tiếng Việt (đã bỏ dấu, viết thường) -> tiếng Anh.
 _VN_EN_TOKENS: dict[str, str] = {
-    # Mạo từ / đại từ / phân loại
+    # Mạo từ / đại từ / phân loại & sửa lỗi chính tả phổ biến (typos)
     "con": "a", "chu": "a", "cai": "a", "chiec": "a", "mot": "a", "buc": "a", "tam": "a",
+    "not": "a",  # Sửa typo: 'nột' -> 'một' -> 'a'
     # Con người / nhân vật / vai trò
     "nguoi": "person", "dan": "people", "nam": "man", "nu": "woman",
     "dan ong": "man", "phu nu": "woman", "con trai": "boy", "con gai": "girl",
@@ -151,6 +169,7 @@ _VN_EN_TOKENS: dict[str, str] = {
     "hoc sinh": "student in uniform", "sinh vien": "college student",
     "giao vien": "teacher", "thay giao": "male teacher", "co giao": "female teacher",
     "cong nhan": "factory worker in uniform", "tho xay": "construction worker with helmet",
+    "tho mo": "mining worker with helmet",
     "nong dan": "farmer", "ngu dan": "fisherman", "dau bep": "chef cook",
     "ca si": "singer on stage", "dien vien": "actor", "nghe si": "artist",
     "vu cong": "dancer", "khan gia": "audience spectators", "trong tai": "referee",
@@ -169,6 +188,7 @@ _VN_EN_TOKENS: dict[str, str] = {
     "an": "eat", "an uong": "eating", "uong": "drink", "choi": "play",
     "lam": "do", "cam": "hold", "nam": "hold", "cuoi": "smile", "khoc": "cry",
     "ngu": "sleep", "doc": "read", "viet": "write", "xem": "watch", "nhin": "look",
+    "quan sat": "observing closely", "soi": "observing examining",
     "nghe": "listen", "chup": "take photo", "quay": "film", "chup anh": "taking photo",
     "quay phim": "filming", "dua": "hug", "om": "hug embrace", "bat tay": "handshake",
     "cui chao": "bowing", "vo tay": "clapping", "vay tay": "waving",
@@ -190,6 +210,7 @@ _VN_EN_TOKENS: dict[str, str] = {
     "xe canh sat": "police patrol car", "xe taxi": "taxi cab",
     "xe buyt": "city bus", "xe bus": "bus", "xe khach": "passenger coach bus",
     "xe tai": "cargo truck", "xe container": "container trailer truck",
+    "xe muc": "excavator digging vehicle", "xe ui": "bulldozer",
     "may bay": "airplane", "may bay truc thang": "helicopter", "truc thang": "helicopter",
     "tau hoa": "train", "tau lua": "train", "metro": "metro subway",
     "thuyen": "boat", "tau": "ship", "tau thuy": "ship", "cano": "speed motorboat",
@@ -207,7 +228,7 @@ _VN_EN_TOKENS: dict[str, str] = {
     "mu luoi trai": "cap", "khau trang": "face mask", "kinh": "glasses",
     "kinh ram": "sunglasses", "kinh mat": "glasses", "gang tay": "gloves",
     "giay": "shoes", "dep": "sandals", "ca vat": "necktie", "balo": "backpack", "tui": "bag",
-    # Địa điểm / Bối cảnh / Công trình
+    # Địa điểm / Bối cảnh / Công trình / Môi trường
     "nha": "house", "toa nha": "building", "cao oc": "skyscraper",
     "truong quay": "television news studio", "phong thu": "studio",
     "phong hop": "meeting room", "hoi truong": "auditorium hall", "san khau": "stage",
@@ -225,6 +246,8 @@ _VN_EN_TOKENS: dict[str, str] = {
     "cong vien": "park garden", "quang truong": "city square", "san van dong": "sports stadium",
     "song": "river", "dong song": "river", "bien": "beach ocean", "bai bien": "beach",
     "dong lua": "rice paddy field", "canh dong": "field", "nui": "mountain", "rung": "forest",
+    "mo lo thien": "open-pit mine quarry", "khai thac lo thien": "open-pit mining quarry",
+    "mo da": "stone quarry", "mo quang": "ore mine pit", "khu mo": "mining area quarry",
     # Thời tiết / Sự cố / Hiện tượng
     "ngap nuoc": "flooded street with water", "ngap lut": "flood flooding",
     "trieu cuong": "high tide flooding", "mua": "rain", "mua bao": "storm rain",
@@ -239,17 +262,38 @@ _VN_EN_TOKENS: dict[str, str] = {
     "xanh bien": "blue", "xanh la": "green", "vang": "yellow", "trang": "white",
     "den": "black", "tim": "purple", "cam": "orange", "hong": "pink",
     "nau": "brown", "xam": "gray",
-    # Đồ vật & Văn bản
+    # Đồ vật, Khoáng sản & Văn bản
     "nuoc": "water", "lua": "fire", "bong": "ball", "sach": "book",
     "dien thoai": "phone", "may tinh": "computer", "ti vi": "television TV",
     "ban": "table", "ghe": "chair", "cua": "door", "cua so": "window",
     "cay": "tree", "hoa": "flower", "la": "leaf", "co": "grass",
     "bien bao": "traffic road sign", "bang hieu": "storefront sign",
     "bien so xe": "license plate", "logo": "logo emblem", "dong chu": "written text",
+    "da quy tho": "rough gemstone", "da quy": "gemstone", "da tho": "rough stone gemstone",
+    "ngoc": "gemstone jade", "kim cuong": "diamond",
+    "dia da ngan": "multi-compartment plate", "dia nhieu ngan": "multi-compartment plate",
+    "khay da ngan": "multi-compartment tray", "khay nhieu ngan": "multi-compartment tray",
+    "dia": "plate dish", "khay": "tray plate", "bat": "bowl", "to": "bowl", "ly": "cup glass",
 }
 
 # Cụm truy vấn thường gặp phải được dịch theo cả nghĩa, không ghép từng từ.
 _FIXED_PHRASES: list[tuple[str, str]] = [
+    ("not nguoi", "a person"),
+    ("dia da ngan", "multi-compartment plate"),
+    ("dia nhieu ngan", "multi-compartment plate"),
+    ("khay da ngan", "multi-compartment tray"),
+    ("khay nhieu ngan", "multi-compartment tray"),
+    ("da quy tho", "rough gemstone"),
+    ("da quy", "gemstone"),
+    ("da tho", "rough gemstone"),
+    ("mo lo thien", "open-pit mine quarry"),
+    ("khai thac lo thien", "open-pit mining quarry"),
+    ("goc nhin toan canh", "panoramic wide view"),
+    ("goc nhin tu tren cao", "top-down aerial view"),
+    ("tam nhin toan canh", "panoramic view"),
+    ("tu tren cao", "from above top-down view"),
+    ("can canh", "close-up view"),
+    ("cam tren tay", "holding in hand"),
     ("hinh anh tam bang co chu", "an image of a sign with the text"),
     ("tam bang co chu", "a sign with the text"),
     ("bang hieu co chu", "a storefront sign with the text"),
@@ -677,4 +721,101 @@ def decompose_query_modalities(
             logger.warning("LLM query decomposition failed (%s); using offline heuristic.", exc)
 
     return offline_decompose_modalities(query_text)
+
+
+def offline_decompose_facets(query_text: str) -> VisualQueryFacets:
+    """Deterministic rule-based 4-facet decomposition (GQE 2024 / MQVR ECCV 2022) when LLM is unavailable.
+
+    Deconstructs query into:
+    - q_core: Natural visual overview caption.
+    - q_entity: Subjects, clothing, colors, objects, attributes.
+    - q_action: Verbs, actions, gestures, dynamic movements.
+    - q_scene: Background, setting, environment, camera perspective.
+    """
+    text = (query_text or "").strip()
+    if not text:
+        return VisualQueryFacets(q_core="a video frame")
+
+    translated = offline_translate(text)
+    trans_lower = translated.lower()
+
+    # 1. Entity detection (subjects, clothing, colors, objects, materials)
+    entity_keywords = [
+        "person", "man", "woman", "boy", "girl", "child", "children", "baby",
+        "doctor", "nurse", "reporter", "anchor", "officer", "police", "worker", "farmer",
+        "singer", "actor", "player", "elephant", "dog", "cat", "car", "vehicle",
+        "bus", "truck", "bike", "bicycle", "boat", "ship", "airplane", "helicopter",
+        "shirt", "suit", "jacket", "dress", "uniform", "hat", "helmet", "glasses", "mask",
+        "plate", "tray", "dish", "bowl", "cup", "stone", "rock", "gemstone", "diamond", "ore",
+        "red", "blue", "green", "yellow", "white", "black", "purple", "orange", "pink", "brown", "gray",
+        "dark", "bright", "sign", "banner", "logo",
+    ]
+    matched_entities = [kw for kw in entity_keywords if kw in trans_lower]
+
+    # 2. Action detection (verbs, movements, gestures)
+    action_keywords = [
+        "holding", "hold", "speaking", "speak", "talking", "talk", "interviewing", "interview",
+        "running", "run", "walking", "walk", "sitting", "sit", "standing", "stand",
+        "singing", "sing", "dancing", "dance", "eating", "eat", "drinking", "drink",
+        "driving", "drive", "riding", "ride", "looking", "look", "observing", "observe",
+        "examining", "examine", "pointing", "point", "carrying", "carry", "waving", "wave",
+        "rescuing", "fighting", "playing", "jumping",
+    ]
+    matched_actions = [kw for kw in action_keywords if kw in trans_lower]
+
+    # 3. Scene detection (locations, environment, lighting, camera angle)
+    scene_keywords = [
+        "studio", "room", "hall", "stage", "hospital", "school", "classroom", "library",
+        "market", "supermarket", "mall", "shop", "restaurant", "hotel", "church", "temple",
+        "street", "road", "intersection", "roundabout", "bridge", "tunnel", "sidewalk",
+        "station", "airport", "harbor", "park", "square", "stadium", "river", "beach", "ocean",
+        "field", "mountain", "forest", "mine", "quarry", "open-pit",
+        "panoramic", "top-down", "aerial", "close-up", "daylight", "nighttime", "sunset", "sunrise",
+        "outdoor", "indoor",
+    ]
+    matched_scenes = [kw for kw in scene_keywords if kw in trans_lower]
+
+    q_core = translated
+    q_entity = f"a view of {', '.join(matched_entities)}" if matched_entities else f"subjects in {translated}"
+    q_action = f"action showing {', '.join(matched_actions)}" if matched_actions else f"action in {translated}"
+    q_scene = f"scene in {', '.join(matched_scenes)}" if matched_scenes else f"environment of {translated}"
+
+    return VisualQueryFacets(
+        q_core=q_core,
+        q_entity=q_entity,
+        q_action=q_action,
+        q_scene=q_scene,
+    )
+
+
+def formulate_visual_facets(
+    query_text: str,
+    llm: LocalLLM | None = None,
+    use_llm: bool = True,
+) -> VisualQueryFacets:
+    """Formulate visual search query and decompose into 4 facets (GQE / SRRF).
+
+    Tầng 1: LLM Visual Query Formulator (fixes typos, visual caption phrasing).
+    Tầng 2: Multi-Facet Decomposition (q_core, q_entity, q_action, q_scene).
+    Falls back to offline rule-based heuristic when LLM is disabled or unavailable.
+    """
+    text = (query_text or "").strip()
+    if not text:
+        return VisualQueryFacets(q_core="a video frame")
+
+    if use_llm and llm is not None:
+        try:
+            rem, prot = _split_protect(text)
+            res = llm.structured(_VISUAL_FORMULATOR_SYSTEM_PROMPT, rem, VisualQueryFacets)
+            # Restore protected text across all 4 facets
+            res.q_core = _restore(res.q_core, prot).strip()
+            res.q_entity = _restore(res.q_entity, prot).strip()
+            res.q_action = _restore(res.q_action, prot).strip()
+            res.q_scene = _restore(res.q_scene, prot).strip()
+            if res.q_core:
+                return res
+        except Exception as exc:
+            logger.warning("LLM visual query formulation failed (%s); using offline fallback.", exc)
+
+    return offline_decompose_facets(text)
 

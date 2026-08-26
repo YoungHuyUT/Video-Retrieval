@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from aic2026.agent.types import ModalityDecomposition
+from aic2026.agent.types import ModalityDecomposition, VisualQueryFacets
 from aic2026.models import Candidate, FrameRecord
 
 logger = logging.getLogger(__name__)
@@ -132,17 +132,26 @@ class RetrievalTools:
         limit: int = 100,
         task_type: str = "kis",
         modality: ModalityDecomposition | None = None,
+        facets: VisualQueryFacets | None = None,
     ) -> list[Candidate]:
         """Retrieve task-appropriate candidates.
 
-        Supports Adaptive Multimodal Score Fusion (AAAI 2026) across Visual (CLIP),
-        On-Screen Text (OCR), and Speech Transcripts (ASR).
+        Supports:
+        - Tầng 2: GQE Multi-Facet Decomposition (q_core, q_entity, q_action, q_scene).
+        - Tầng 3: Score-Reflected Reciprocal Rank Fusion (SRRF).
+        - Adaptive Multimodal Score Fusion (AAAI 2026) across Visual (CLIP), OCR, and ASR.
         """
 
         if limit <= 0:
             return []
 
-        queries = [query] if isinstance(query, str) else list(query)
+        if facets is not None:
+            queries = facets.to_list()
+        elif isinstance(query, str):
+            queries = [query]
+        else:
+            queries = list(query)
+
         embeddings = [self.encode_text(q) for q in queries]
 
         requires_dense_evidence = (
@@ -191,9 +200,12 @@ class RetrievalTools:
             w_ocr = modality.w_ocr if modality else 0.2
             w_asr = modality.w_asr if modality else 0.2
 
+            # Pass multi-facet embeddings for SRRF visual fusion when available
+            vis_emb_input = embeddings if len(embeddings) > 1 else embeddings[0]
+
             candidates = self.pipeline.adaptive_multimodal_retrieve_raw(
                 visual_query=vis_q,
-                text_embedding=embeddings[0],
+                text_embedding=vis_emb_input,
                 bm25_index=self.bm25_index,
                 ocr_query=ocr_q,
                 asr_query=asr_q,
@@ -210,15 +222,23 @@ class RetrievalTools:
                 video_ids=allowed_video_ids,
             )
         elif len(embeddings) > 1:
-            # Multi-query expansion: RRF-fuse per-variant vector rankings.
-            ranked_lists = []
-            for emb in embeddings:
-                ids, _ = self.pipeline.search_with_filter(
-                    emb, pool, allowed_video_ids
+            # Multi-facet GQE visual retrieval via Score-Reflected RRF (SRRF)
+            if hasattr(self.pipeline, "multi_facet_retrieve_raw"):
+                candidates = self.pipeline.multi_facet_retrieve_raw(
+                    facet_embeddings=embeddings,
+                    top_frames=pool,
+                    video_ids=allowed_video_ids,
+                    k_rrf=60,
                 )
-                ranked_lists.append(np.asarray(ids, dtype=np.int64))
-            fused = self.pipeline._rrf_fuse(ranked_lists)
-            candidates = self.pipeline._candidates_from_scores(fused, limit=limit)
+            else:
+                ranked_lists = []
+                for emb in embeddings:
+                    ids, _ = self.pipeline.search_with_filter(
+                        emb, pool, allowed_video_ids
+                    )
+                    ranked_lists.append(np.asarray(ids, dtype=np.int64))
+                fused = self.pipeline._rrf_fuse(ranked_lists)
+                candidates = self.pipeline._candidates_from_scores(fused, limit=limit)
         else:
             candidates = self.pipeline.retrieve_raw(
                 text_embedding=embeddings[0],

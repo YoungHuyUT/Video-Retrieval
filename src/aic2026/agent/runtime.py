@@ -115,7 +115,7 @@ class RetrievalAgent:
         # --- Translate Vietnamese → English (deterministic pipeline dropped the
         # LLM planner that used to do this). Text inside brackets (…), […],
         # {…}, and quotes is preserved verbatim (e.g. names / sign text).
-        from .translator import decompose_query_modalities, translate_query_fields
+        from .translator import decompose_query_modalities, formulate_visual_facets, translate_query_fields
 
         if self.translate:
             use_llm = self.llm is not None
@@ -176,25 +176,39 @@ class RetrievalAgent:
             elif not t_clean and q_clean:
                 retrieval_text = q_clean
 
+        # Tầng 1 & Tầng 2: Visual Query Formulation & GQE Multi-Facet Decomposition (cho KIS / Q&A)
+        if self.translate and query.type != "trake":
+            visual_facets = formulate_visual_facets(
+                retrieval_text,
+                llm=self.llm,
+                use_llm=self.llm is not None,
+            )
+        else:
+            visual_facets = None
+
         # Modality routing & decomposition (Visual / OCR / ASR) — AAAI 2026
         modality_plan = decompose_query_modalities(
             retrieval_text,
             llm=self.llm,
             use_llm=self.translate and self.llm is not None,
         )
+        if visual_facets and visual_facets.q_core:
+            modality_plan.visual_query = visual_facets.q_core
 
         plan = AgentPlan(
-            query_variants=[retrieval_text],
+            query_variants=visual_facets.to_list() if visual_facets is not None else [retrieval_text],
             events=(
                 list(query.events)
                 if query.type == "trake"
                 else []
             ),
             rationale=(
-                f"Adaptive multimodal plan: w_vis={modality_plan.w_vis}, "
-                f"w_ocr={modality_plan.w_ocr}, w_asr={modality_plan.w_asr}. {modality_plan.reason}"
+                f"Adaptive multimodal plan (w_vis={modality_plan.w_vis}, "
+                f"w_ocr={modality_plan.w_ocr}, w_asr={modality_plan.w_asr})"
+                + (f" with 4-Facet GQE: q_core='{visual_facets.q_core[:60]}...'" if visual_facets else "")
             ),
             modality=modality_plan,
+            facets=visual_facets,
         )
         trace.append(
             AgentTrace(
@@ -202,6 +216,13 @@ class RetrievalAgent:
                 detail=plan.rationale,
             )
         )
+        if visual_facets is not None:
+            trace.append(
+                AgentTrace(
+                    step="gqe_facets",
+                    detail=json.dumps(visual_facets.model_dump(), ensure_ascii=False),
+                )
+            )
 
         # TRAKE uses deterministic event-wise retrieval and monotonic DP.
         if query.type == "trake":
@@ -241,19 +262,20 @@ class RetrievalAgent:
                 trace=trace,
             )
 
-        # KIS / Q&A: retrieve with Adaptive Multimodal Fusion across Visual, OCR, and ASR
+        # KIS / Q&A: retrieve with Multi-Facet SRRF & Multimodal Fusion (Visual, OCR, ASR)
         self.tools.video_prefixes = None
         found = self.tools.retrieve(
             query=retrieval_text,
             limit=self.retrieval_pool_size,
             task_type=query.type,
             modality=modality_plan,
+            facets=visual_facets,
         )
         trace.append(
             AgentTrace(
                 step="retrieve",
                 detail=(
-                    f"{len(found)} candidates via Adaptive Multimodal Fusion "
+                    f"{len(found)} candidates via 4-Facet SRRF & Multimodal Fusion "
                     f"(vis={modality_plan.w_vis}, ocr={modality_plan.w_ocr}, asr={modality_plan.w_asr})"
                 ),
             )
