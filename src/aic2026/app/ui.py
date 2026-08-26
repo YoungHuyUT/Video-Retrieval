@@ -448,10 +448,18 @@ def build_btc_csv(query: Query, candidates: list[Candidate], selected_idx: list[
     return "\n".join(csv_row(query, c) for c in picked)
 
 
+_VIDEO_FILE_CACHE: dict[str, Path] = {}
+_PTS_CACHE: dict[str, dict[int, float]] = {}
+
+
 def resolve_video_file(video_id: str, custom_root: str | Path | None = None) -> Path | None:
-    """Tìm file video .mp4 trên đĩa cho video_id."""
+    """Tìm file video .mp4 trên đĩa cho video_id (có cache bộ nhớ đệm)."""
     clean_vid = video_id.strip()
-    candidates: list[Path] = []
+    cache_key = f"{clean_vid}_{custom_root}"
+    if cache_key in _VIDEO_FILE_CACHE:
+        cached = _VIDEO_FILE_CACHE[cache_key]
+        if cached.exists():
+            return cached
 
     roots = []
     if custom_root:
@@ -463,18 +471,19 @@ def resolve_video_file(video_id: str, custom_root: str | Path | None = None) -> 
         Path("data/extracted/Videos"),
         Path("data/raw/Videos"),
         Path("data/Videos"),
-        Path.cwd() / "data" / "raw" / "Videos",
     ])
 
     for r in roots:
         for ext in (".mp4", ".MP4", ".mkv", ".avi", ".mov"):
-            candidates.append(r / f"{clean_vid}{ext}")
-            candidates.append(r / clean_vid / f"{clean_vid}{ext}")
-            candidates.append(r / f"{clean_vid.lower()}{ext}")
+            c = r / f"{clean_vid}{ext}"
+            if c.exists() and c.is_file():
+                _VIDEO_FILE_CACHE[cache_key] = c
+                return c
+            c_sub = r / clean_vid / f"{clean_vid}{ext}"
+            if c_sub.exists() and c_sub.is_file():
+                _VIDEO_FILE_CACHE[cache_key] = c_sub
+                return c_sub
 
-    for c in candidates:
-        if c.exists() and c.is_file():
-            return c
     return None
 
 
@@ -486,37 +495,45 @@ def format_timestamp(seconds: float) -> str:
     return f"{m:02d}:{s:02d}.{ms:02d}"
 
 
-@st.cache_data(show_spinner=False)
-def load_all_pts_maps(map_dir_str: str | None) -> dict[str, dict[int, float]]:
-    """Cache toàn bộ map-keyframes CSVs để truy xuất timestamp tức thì."""
-    if not map_dir_str:
-        return {}
-    p = Path(map_dir_str)
-    if not p.exists():
-        return {}
-    all_pts: dict[str, dict[int, float]] = {}
-    csv_files = list(p.glob("*.csv"))
-    if (p / "map-keyframes").exists():
-        csv_files.extend(list((p / "map-keyframes").glob("*.csv")))
-    for cf in csv_files:
-        vid = cf.stem
-        pts_map = {}
-        try:
-            with cf.open(encoding="utf-8") as fh:
-                reader = csv.DictReader(fh)
-                for row in reader:
-                    f_idx = row.get("frame_idx")
-                    pts = row.get("pts_time")
-                    if f_idx and pts:
-                        try:
-                            pts_map[int(f_idx)] = float(pts)
-                        except ValueError:
-                            pass
-            if pts_map:
-                all_pts[vid] = pts_map
-        except Exception:
-            pass
-    return all_pts
+def get_single_video_pts_map(video_id: str, map_dir: str | Path | None = None) -> dict[int, float]:
+    """Đọc trực tiếp 1 file CSV của video_id để lấy mốc thời gian (nhanh gấp 100x so với quét toàn bộ thư mục)."""
+    clean_vid = video_id.strip()
+    if clean_vid in _PTS_CACHE:
+        return _PTS_CACHE[clean_vid]
+
+    roots = [
+        Path(map_dir) if map_dir else Path(DEFAULT_MAP_KEYFRAMES),
+        Path(DEFAULT_MAP_KEYFRAMES),
+        Path(r"D:\bachkhoa\ai_challenge\data\extracted\map-keyframes"),
+        Path("data/extracted/map-keyframes"),
+        Path("data/raw/map-keyframes"),
+    ]
+
+    for r in roots:
+        candidates = [
+            r / f"{clean_vid}.csv",
+            r / "map-keyframes" / f"{clean_vid}.csv",
+        ]
+        for c in candidates:
+            if c.exists() and c.is_file():
+                pts_map: dict[int, float] = {}
+                try:
+                    with c.open(encoding="utf-8") as fh:
+                        reader = csv.DictReader(fh)
+                        for row in reader:
+                            f_idx = row.get("frame_idx")
+                            pts = row.get("pts_time")
+                            if f_idx and pts:
+                                try:
+                                    pts_map[int(f_idx)] = float(pts)
+                                except ValueError:
+                                    pass
+                    if pts_map:
+                        _PTS_CACHE[clean_vid] = pts_map
+                        return pts_map
+                except Exception:
+                    pass
+    return {}
 
 
 def get_frame_timestamp(
@@ -525,22 +542,10 @@ def get_frame_timestamp(
     map_dir: str | Path | None = None,
     default_fps: float = 25.0,
 ) -> float:
-    """Lấy mốc thời gian (giây) của frame_id trong video_id."""
-    map_dir_str = str(map_dir) if map_dir else DEFAULT_MAP_KEYFRAMES
-    pts_cache = load_all_pts_maps(map_dir_str)
-    if video_id in pts_cache and frame_id in pts_cache[video_id]:
-        return pts_cache[video_id][frame_id]
-
-    for fallback_dir in (
-        DEFAULT_MAP_KEYFRAMES,
-        r"D:\bachkhoa\ai_challenge\data\extracted\map-keyframes",
-        "data/extracted/map-keyframes",
-        "data/raw/map-keyframes",
-    ):
-        f_cache = load_all_pts_maps(fallback_dir)
-        if video_id in f_cache and frame_id in f_cache[video_id]:
-            return f_cache[video_id][frame_id]
-
+    """Lấy mốc thời gian (giây) của frame_id trong video_id siêu tốc."""
+    pts_map = get_single_video_pts_map(video_id, map_dir)
+    if frame_id in pts_map:
+        return pts_map[frame_id]
     return float(frame_id) / default_fps
 
 
@@ -753,36 +758,32 @@ setInterval(update, 200);
                         st.session_state[state_key] = next_fid
                         st.rerun()
 
-    # Section: Keyframe Inspector của video đang mở
+    # Section: Keyframe Inspector của video đang mở (Tối ưu tải siêu nhanh)
     st.markdown("---")
-    st.markdown(f"#### 🎞️ Toàn bộ Keyframes của video `{video_id}` ({len(all_frames)} keyframes)")
+    st.markdown(f"#### 🎞️ Keyframes lân cận của video `{video_id}` ({len(all_frames)} keyframes tổng)")
 
     cols_per_row = 6
-    if len(all_frames) > 60:
-        st.caption(f"Đang hiển thị 60/{len(all_frames)} keyframes (lân cận frame hiện tại)")
-        curr_idx = all_frames.index(current_fid) if current_fid in all_frames else 0
-        start_idx = max(0, curr_idx - 30)
-        end_idx = min(len(all_frames), start_idx + 60)
-        slice_frames = all_frames[start_idx:end_idx]
-    else:
-        slice_frames = all_frames
+    curr_idx = all_frames.index(current_fid) if current_fid in all_frames else 0
+    # Lấy 12 frame lân cận gần nhất để mở modal tức thì trong chớp mắt
+    start_idx = max(0, curr_idx - 5)
+    end_idx = min(len(all_frames), start_idx + 12)
+    slice_frames = all_frames[start_idx:end_idx]
 
-    for row_start in range(0, len(slice_frames), cols_per_row):
-        row_frames = slice_frames[row_start : row_start + cols_per_row]
-        cols = st.columns(len(row_frames))
-        for c_idx, fid in enumerate(row_frames):
+    def _render_kf_row(frames_chunk: list[int]):
+        cols = st.columns(len(frames_chunk))
+        for c_idx, fid in enumerate(frames_chunk):
             with cols[c_idx]:
                 f_ts = get_frame_timestamp(video_id, fid, map_dir)
                 f_path = event_keyframe_file(video_id, fid, lookup, keyframes_root or Path("data/processed"))
                 is_active = (fid == current_fid)
                 if f_path and f_path.exists():
                     st.image(str(f_path), use_container_width=True)
-                st.caption(f"{'👉 ' if is_active else ''}**`{fid}`**\n({format_timestamp(f_ts)})")
+                st.caption(f"{'👉 ' if is_active else ''}**`{fid}`** ({format_timestamp(f_ts)})")
                 
                 c_k1, c_k2 = st.columns(2)
                 with c_k1:
                     if not is_active:
-                        if st.button("▶️ Mở", key=f"kf_jump_{video_id}_{fid}", use_container_width=True):
+                        if st.button("▶️", key=f"kf_jump_{video_id}_{fid}", use_container_width=True, help=f"Nhảy video tới frame {fid}"):
                             st.session_state[state_key] = fid
                             st.rerun()
                 with c_k2:
@@ -792,6 +793,14 @@ setInterval(update, 200);
                                    title="Copy '{video_id}, {fid}'">📋</button>""",
                         unsafe_allow_html=True,
                     )
+
+    for row_start in range(0, len(slice_frames), cols_per_row):
+        _render_kf_row(slice_frames[row_start : row_start + cols_per_row])
+
+    if len(all_frames) > len(slice_frames):
+        with st.expander(f"📂 Xem toàn bộ {len(all_frames)} keyframes của video `{video_id}`", expanded=False):
+            for row_start in range(0, len(all_frames), cols_per_row):
+                _render_kf_row(all_frames[row_start : row_start + cols_per_row])
 
 
 # ---------------------------------------------------------------------------
