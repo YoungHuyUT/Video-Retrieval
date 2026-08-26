@@ -233,3 +233,29 @@ def test_retrieval_agent_runs_with_gqe_srrf() -> None:
     assert "q_entity" in parsed_facets
     assert "q_action" in parsed_facets
     assert "q_scene" in parsed_facets
+
+
+def test_vector_index_search_batch_and_filtered() -> None:
+    pipeline = build_test_pipeline()
+    idx = pipeline.index
+    idx.manifest_video_ids = ["V1", "V1", "V2", "V3", "V4"]
+
+    # 4 queries matching frames 0, 1, 3, 4
+    queries = np.eye(4, dtype=np.float32)
+
+    # Batch search
+    ids, scores = idx.search_batch(queries, k=3)
+    assert ids.shape == (4, 3)
+    assert scores.shape == (4, 3)
+    assert ids[0, 0] == 0  # query 0 matches frame 0 best
+    assert ids[1, 0] == 1  # query 1 matches frame 1 best
+    assert ids[2, 0] == 3  # query 2 matches frame 3 best
+    assert ids[3, 0] == 4  # query 3 matches frame 4 best
+
+    # Filtered batch search (only allow video V1 -> frames 0, 1)
+    f_ids, f_scores = idx.search_filtered_batch(queries, k=2, video_ids={"V1"})
+    assert f_ids.shape == (4, 2)
+    # All returned IDs must be in {0, 1}
+    for row in f_ids:
+        for vid in row:
+            assert vid in (0, 1)

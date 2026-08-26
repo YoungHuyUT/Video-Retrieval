@@ -724,6 +724,7 @@ if st.session_state.get("_run_agent"):
                 # Bản dịch (giữ nguyên cho mọi luồng)
                 translated = None
                 translation_source = None
+                gqe_facets = None
                 for step in result.trace:
                     if step.step == "translate":
                         try:
@@ -734,8 +735,13 @@ if st.session_state.get("_run_agent"):
                             translated = _text_change.get("to") or _td.get("to")
                         except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
                             translated = None
-                        break
+                    elif step.step == "gqe_facets":
+                        try:
+                            gqe_facets = json.loads(step.detail)
+                        except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
+                            gqe_facets = None
                 st.session_state["translated_query"] = translated
+                st.session_state["gqe_facets"] = gqe_facets
                 if translation_source == "offline_fallback":
                     st.toast(
                         f"⚠️ LLM dịch lỗi — đang dùng bản dịch offline: {translated or text}",
@@ -814,6 +820,18 @@ elif _query_text_raw and _is_english(_query_text_raw):
         f'<span class="small-muted">Query đã là tiếng Anh — không cần dịch.</span></div>',
         unsafe_allow_html=True,
     )
+
+# Hiển thị bóc tách 4 Tầng Thị Giác (GQE & SRRF Fusion)
+_gqe = st.session_state.get("gqe_facets")
+if _gqe and isinstance(_gqe, dict) and any(_gqe.values()):
+    with st.expander("🔍 Bóc tách 4 Tầng Thị Giác (GQE & SRRF Fusion)", expanded=False):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(f"**🎯 q_core (Toàn cảnh):** `{_gqe.get('q_core', '')}`")
+            st.markdown(f"**👤 q_entity (Chủ thể/Thuộc tính):** `{_gqe.get('q_entity', '')}`")
+        with c2:
+            st.markdown(f"**⚡ q_action (Hành động/Cử chỉ):** `{_gqe.get('q_action', '')}`")
+            st.markdown(f"**🏞️ q_scene (Bối cảnh/Góc máy):** `{_gqe.get('q_scene', '')}`")
 
 st.markdown("<hr style='margin:.3rem 0 1rem;'>", unsafe_allow_html=True)
 

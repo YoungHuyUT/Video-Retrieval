@@ -129,3 +129,91 @@ class VectorIndex:
         top = np.argpartition(-scores, k - 1)[:k]
         top = top[np.argsort(-scores[top])]
         return ids[top], scores[top]
+
+    def search_batch(
+        self,
+        queries: np.ndarray,
+        k: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Parallel multi-query vector search for M queries (shape (M, D)).
+
+        Runs parallel/vectorized ANN scans for all query vectors in a single pass.
+        Returns (ids, scores) each of shape (M, k).
+        """
+        queries = np.asarray(queries, dtype=np.float32)
+        if queries.ndim == 1:
+            ids, scores = self.search(queries, k)
+            return ids[None, :], scores[None, :]
+
+        norms = np.maximum(np.linalg.norm(queries, axis=1, keepdims=True), 1e-12)
+        normed_queries = (queries / norms).astype(np.float32)
+        k = min(k, len(self.vectors))
+        if k <= 0:
+            return np.empty((len(queries), 0), dtype=np.int64), np.empty((len(queries), 0), dtype=np.float32)
+
+        if self._faiss is not None:
+            scores, ids = self._faiss.search(normed_queries, k)
+            return ids, scores
+
+        all_dots = self.vectors @ normed_queries.T  # (N, M)
+        if self._norms is not None:
+            all_dots = all_dots / np.maximum(self._norms[:, None], 1e-12)
+
+        out_ids = np.empty((len(queries), k), dtype=np.int64)
+        out_scores = np.empty((len(queries), k), dtype=np.float32)
+
+        for i in range(len(queries)):
+            col_scores = all_dots[:, i]
+            col_k = min(k, len(col_scores))
+            part_idx = np.argpartition(-col_scores, col_k - 1)[:col_k]
+            sorted_part = part_idx[np.argsort(-col_scores[part_idx])]
+            out_ids[i] = sorted_part
+            out_scores[i] = col_scores[sorted_part]
+
+        return out_ids, out_scores
+
+    def search_filtered_batch(
+        self,
+        queries: np.ndarray,
+        k: int,
+        video_ids: set[str] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Parallel multi-query vector search restricted to *video_ids*."""
+        if not video_ids:
+            return self.search_batch(queries, k)
+        if len(self.manifest_video_ids) != len(self.vectors):
+            raise ValueError("manifest_video_ids must align with the vector index")
+
+        queries = np.asarray(queries, dtype=np.float32)
+        if queries.ndim == 1:
+            ids, scores = self.search_filtered(queries, k, video_ids)
+            return ids[None, :], scores[None, :]
+
+        norms = np.maximum(np.linalg.norm(queries, axis=1, keepdims=True), 1e-12)
+        normed_queries = (queries / norms).astype(np.float32)
+
+        allowed = np.fromiter(
+            (video_id in video_ids for video_id in self.manifest_video_ids),
+            dtype=bool,
+            count=len(self.manifest_video_ids),
+        )
+        cand_indices = np.flatnonzero(allowed)
+        if len(cand_indices) == 0:
+            return np.empty((len(queries), 0), dtype=np.int64), np.empty((len(queries), 0), dtype=np.float32)
+
+        dots = self.vectors[cand_indices] @ normed_queries.T  # (C, M)
+        if self._norms is not None:
+            dots = dots / np.maximum(self._norms[cand_indices, None], 1e-12)
+
+        k_val = min(k, len(cand_indices))
+        out_ids = np.empty((len(queries), k_val), dtype=np.int64)
+        out_scores = np.empty((len(queries), k_val), dtype=np.float32)
+
+        for i in range(len(queries)):
+            col_scores = dots[:, i]
+            part_idx = np.argpartition(-col_scores, k_val - 1)[:k_val]
+            sorted_part = part_idx[np.argsort(-col_scores[part_idx])]
+            out_ids[i] = cand_indices[sorted_part]
+            out_scores[i] = col_scores[sorted_part]
+
+        return out_ids, out_scores

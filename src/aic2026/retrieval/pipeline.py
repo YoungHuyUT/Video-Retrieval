@@ -486,9 +486,15 @@ class RetrievalPipeline:
             return []
 
         ranked_results: list[tuple[np.ndarray, np.ndarray]] = []
-        for emb in facet_embeddings:
-            ids, scores = self.search_with_filter(emb, top_frames, video_ids)
-            ranked_results.append((ids, scores))
+        if hasattr(self.index, "search_filtered_batch"):
+            mat = np.stack(facet_embeddings, axis=0)
+            all_ids, all_scores = self.index.search_filtered_batch(mat, top_frames, video_ids)
+            for ids, scores in zip(all_ids, all_scores):
+                ranked_results.append((ids, scores))
+        else:
+            for emb in facet_embeddings:
+                ids, scores = self.search_with_filter(emb, top_frames, video_ids)
+                ranked_results.append((ids, scores))
 
         fused_scores = self._srrf_fuse(ranked_results, k=k_rrf)
         return self._candidates_from_scores(fused_scores, limit=top_frames)
