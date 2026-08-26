@@ -572,18 +572,42 @@ def show_video_dialog(
                 f"Hãy đặt file video vào `data/raw/Videos/` để phát video trực tiếp."
             )
 
-        # Nút lấy số frame hiện tại (Ctrl + G) & HUD Script
+        # Live Frame Tracker Card & Nút Click Chuột Siêu Tốc
         hud_btn_html = f"""
-        <div style="margin: 8px 0;">
-            <button id="btn-get-frame-hud" onclick="window.triggerCaptureFrame('{html.escape(video_id)}', {html.escape(json.dumps(kfs_json_str))});"
-                    style="width: 100%; background: linear-gradient(135deg, #4f46e5 0%, #3730a3 100%); color: white;
-                           border: none; padding: 10px 16px; border-radius: 8px; font-weight: bold; cursor: pointer;
-                           font-size: 0.95rem; display: flex; align-items: center; justify-content: center; gap: 8px;
-                           box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25); transition: transform 0.1s, background 0.2s;">
-                <span>🎯</span>
-                <span>Lấy số Frame tại thời điểm này</span>
-                <span style="background: rgba(255,255,255,0.22); padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-family: monospace;">Ctrl + G</span>
-            </button>
+        <div style="background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%); border: 2px solid #6366f1;
+                    border-radius: 12px; padding: 14px 18px; margin: 12px 0 10px 0; box-shadow: 0 6px 18px rgba(0,0,0,0.45);">
+            <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+                <div>
+                    <div style="font-size: 0.75rem; color: #a5b4fc; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px;">
+                        ⚡ FRAME ĐANG PHÁT HIỆN TẠI (LIVE TRACKER)
+                    </div>
+                    <div style="display: flex; align-items: baseline; gap: 8px; margin-top: 4px;">
+                        <span style="font-size: 1rem; color: #cbd5e1; font-weight: 600;">Frame:</span>
+                        <span id="live-frame-display" style="font-size: 1.85rem; font-weight: 900; color: #fbbf24; font-family: monospace; background: rgba(0,0,0,0.55); padding: 2px 10px; border-radius: 6px; border: 1px solid rgba(251,191,36,0.3);">---</span>
+                        <span id="live-time-display" style="font-size: 0.95rem; color: #94a3b8; font-weight: 500;">(00:00.00)</span>
+                    </div>
+                </div>
+
+                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                    <button id="btn-click-copy-frame" onclick="window.copyCurrentVideoFrame('{html.escape(video_id)}');"
+                            style="background: linear-gradient(135deg, #e11d48 0%, #be123c 100%); color: white; border: none;
+                                   padding: 10px 18px; border-radius: 8px; font-weight: 700; font-size: 0.95rem; cursor: pointer;
+                                   display: flex; align-items: center; gap: 8px; box-shadow: 0 4px 14px rgba(225, 29, 72, 0.4); transition: transform 0.1s, background 0.2s;">
+                        <span style="font-size: 1.1rem;">📋</span>
+                        <span id="copy-btn-text">BẤM COPY FRAME NÀY</span>
+                    </button>
+                    <button id="btn-click-hud-frame" onclick="window.triggerCaptureFrame('{html.escape(video_id)}', {html.escape(json.dumps(kfs_json_str))});"
+                            style="background: linear-gradient(135deg, #4f46e5 0%, #3730a3 100%); color: white; border: none;
+                                   padding: 10px 16px; border-radius: 8px; font-weight: 700; font-size: 0.95rem; cursor: pointer;
+                                   display: flex; align-items: center; gap: 8px; box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35); transition: transform 0.1s, background 0.2s;">
+                        <span style="font-size: 1.1rem;">🎯</span>
+                        <span>BẬT BẢNG CHI TIẾT</span>
+                    </button>
+                </div>
+            </div>
+            <div id="live-kf-closest" style="font-size: 0.8rem; color: #cbd5e1; margin-top: 8px; border-top: 1px solid rgba(255,255,255,0.12); padding-top: 6px;">
+                🎞️ Đang theo dõi video... (Bấm nút đỏ để Copy ngay số Frame)
+            </div>
         </div>
 
         <script>
@@ -596,45 +620,77 @@ def show_video_dialog(
                 return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0') + '.' + String(ms).padStart(2, '0');
             }}
 
-            window.triggerCaptureFrame = function(vid, kfsJson) {{
+            function getActiveVideo() {{
                 const dialog = document.querySelector('div[data-testid="stDialog"]') || document.body;
-                const videoEl = dialog.querySelector('video') || document.querySelector('video');
-                if (!videoEl) {{
-                    alert("Không tìm thấy thẻ video đang phát.");
-                    return;
-                }}
+                return dialog.querySelector('video') || document.querySelector('video');
+            }}
 
-                const curTime = videoEl.currentTime || 0;
-                const fps = 25.0;
-                const calcFrame = Math.round(curTime * fps);
-                const timeStr = formatTime(curTime);
+            let kfsList = [];
+            try {{
+                kfsList = JSON.parse({html.escape(json.dumps(kfs_json_str))});
+            }} catch(e) {{}}
 
-                let closestKf = null;
-                let minDiff = 999999;
-                let kfsList = [];
-                try {{
-                    if (typeof kfsJson === 'string') {{
-                        kfsList = JSON.parse(kfsJson);
-                    }} else if (Array.isArray(kfsJson)) {{
-                        kfsList = kfsJson;
-                    }}
-                }} catch(e) {{}}
+            function updateLive() {{
+                const v = getActiveVideo();
+                if (!v) return;
+                const cur = v.currentTime || 0;
+                const calcFid = Math.round(cur * 25.0);
+                const tStr = formatTime(cur);
 
+                const fEl = document.getElementById("live-frame-display");
+                const tEl = document.getElementById("live-time-display");
+                if (fEl) fEl.innerText = String(calcFid);
+                if (tEl) tEl.innerText = "(" + tStr + ")";
+
+                // Tìm keyframe gần nhất
                 if (Array.isArray(kfsList) && kfsList.length > 0) {{
+                    let closest = null;
+                    let minD = 999999;
                     for (const kf of kfsList) {{
-                        const kfSec = (typeof kf.pts === 'number') ? kf.pts : (kf.fid / fps);
-                        const diff = Math.abs(kfSec - curTime);
-                        if (diff < minDiff) {{
-                            minDiff = diff;
-                            closestKf = kf;
+                        const kfSec = (typeof kf.pts === 'number') ? kf.pts : (kf.fid / 25.0);
+                        const diff = Math.abs(kfSec - cur);
+                        if (diff < minD) {{
+                            minD = diff;
+                            closest = kf;
                         }}
                     }}
+                    const kfEl = document.getElementById("live-kf-closest");
+                    if (kfEl && closest) {{
+                        kfEl.innerHTML = "🎞️ Keyframe gần nhất: <b style='color:#93c5fd;'>#" + closest.fid + "</b> (mốc " + formatTime(closest.pts) + ", lệch " + minD.toFixed(2) + "s)";
+                    }}
                 }}
+            }}
 
-                const copyText = vid ? (vid + ", " + calcFrame) : String(calcFrame);
-                try {{
-                    navigator.clipboard.writeText(copyText);
-                }} catch(e) {{}}
+            window.copyCurrentVideoFrame = function(vid) {{
+                const v = getActiveVideo();
+                const cur = v ? (v.currentTime || 0) : 0;
+                const calcFid = Math.round(cur * 25.0);
+                const text = vid ? (vid + ", " + calcFid) : String(calcFid);
+
+                navigator.clipboard.writeText(text).catch(() => {{}});
+
+                const btn = document.getElementById("btn-click-copy-frame");
+                const txt = document.getElementById("copy-btn-text");
+                if (txt) txt.innerText = "✅ ĐÃ COPY: " + calcFid;
+                if (btn) btn.style.background = "#059669";
+
+                setTimeout(() => {{
+                    if (txt) txt.innerText = "BẤM COPY FRAME NÀY";
+                    if (btn) btn.style.background = "linear-gradient(135deg, #e11d48 0%, #be123c 100%)";
+                }}, 2500);
+
+                window.triggerCaptureFrame(vid, kfsList);
+            }};
+
+            window.triggerCaptureFrame = function(vid, kfs) {{
+                const v = getActiveVideo();
+                if (!v) return;
+                const cur = v.currentTime || 0;
+                const calcFid = Math.round(cur * 25.0);
+                const tStr = formatTime(cur);
+                const text = vid ? (vid + ", " + calcFid) : String(calcFid);
+
+                navigator.clipboard.writeText(text).catch(() => {{}});
 
                 let hud = document.getElementById("active-frame-hud");
                 if (!hud) {{
@@ -652,21 +708,20 @@ def show_video_dialog(
                         <div style="font-size: 2rem;">🎯</div>
                         <div style="flex: 1;">
                             <div style="font-size: 0.8rem; color: #a5b4fc; text-transform: uppercase; font-weight: bold; letter-spacing: 0.5px;">
-                                THỜI ĐIỂM VIDEO HIỆN TẠI (Ctrl+G)
+                                THỜI ĐIỂM VIDEO HIỆN TẠI
                             </div>
                             <div style="font-size: 1.25rem; font-weight: bold; margin-top: 3px;">
-                                Frame: <span style="color: #fbbf24; font-size: 1.5rem; background: rgba(0,0,0,0.4); padding: 2px 10px; border-radius: 6px; font-family: monospace;">${{calcFrame}}</span>
+                                Frame: <span style="color: #fbbf24; font-size: 1.5rem; background: rgba(0,0,0,0.4); padding: 2px 10px; border-radius: 6px; font-family: monospace;">${{calcFid}}</span>
                                 ${{vid ? `&nbsp;·&nbsp; <span style="color: #67e8f9;">${{vid}}</span>` : ''}}
                             </div>
                             <div style="font-size: 0.85rem; color: #cbd5e1; margin-top: 3px;">
-                                ⏱️ Mốc: <b>${{timeStr}}</b> (${{curTime.toFixed(2)}}s)
-                                ${{closestKf ? ` &nbsp;|&nbsp; Keyframe gần nhất: <b style="color:#93c5fd;">${{closestKf.fid}}</b> (lệch ${{minDiff.toFixed(2)}}s)` : ''}}
+                                ⏱️ Mốc: <b>${{tStr}}</b> (${{cur.toFixed(2)}}s)
                             </div>
                         </div>
-                        <button onclick="navigator.clipboard.writeText('${{copyText}}'); this.innerText='✅ Đã Copy!';" 
+                        <button onclick="navigator.clipboard.writeText('${{text}}'); this.innerText='✅ Đã Copy!';" 
                                 style="background: #4f46e5; color: white; border: none; padding: 10px 14px; border-radius: 8px;
                                        font-weight: bold; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">
-                            📋 Copy (${{copyText}})
+                            📋 Copy (${{text}})
                         </button>
                         <button onclick="document.getElementById('active-frame-hud').remove();"
                                 style="background: transparent; color: #94a3b8; border: none; font-size: 1.3rem; cursor: pointer; padding: 0 4px;">
@@ -679,24 +734,23 @@ def show_video_dialog(
                 window._hudTimer = setTimeout(() => {{
                     const el = document.getElementById("active-frame-hud");
                     if (el) el.remove();
-                }}, 9000);
+                }}, 7000);
             }};
 
-            // Bắt phím tắt Ctrl + G hoặc Cmd + G
-            if (!window._ctrlGAttached) {{
-                window._ctrlGAttached = true;
-                document.addEventListener('keydown', function(e) {{
-                    if ((e.ctrlKey || e.metaKey) && (e.key === 'g' || e.key === 'G')) {{
-                        e.preventDefault();
-                        const btn = document.getElementById('btn-get-frame-hud');
-                        if (btn) {{
-                            btn.click();
-                        }} else {{
-                            window.triggerCaptureFrame('', '[]');
-                        }}
-                    }}
-                }});
-            }}
+            // Khởi động live tracker
+            clearInterval(window._liveTimer);
+            window._liveTimer = setInterval(updateLive, 150);
+
+            // Bắt sự kiện video
+            setTimeout(() => {{
+                const v = getActiveVideo();
+                if (v) {{
+                    v.addEventListener('timeupdate', updateLive);
+                    v.addEventListener('seeked', updateLive);
+                    v.addEventListener('pause', updateLive);
+                    v.addEventListener('play', updateLive);
+                }}
+            }}, 300);
         }})();
         </script>
         """
@@ -755,10 +809,20 @@ def show_video_dialog(
                 if f_path and f_path.exists():
                     st.image(str(f_path), use_container_width=True)
                 st.caption(f"{'👉 ' if is_active else ''}**`{fid}`**\n({format_timestamp(f_ts)})")
-                if not is_active:
-                    if st.button("▶️ Mở", key=f"kf_jump_{video_id}_{fid}", use_container_width=True):
-                        st.session_state[state_key] = fid
-                        st.rerun()
+                
+                c_k1, c_k2 = st.columns(2)
+                with c_k1:
+                    if not is_active:
+                        if st.button("▶️ Mở", key=f"kf_jump_{video_id}_{fid}", use_container_width=True):
+                            st.session_state[state_key] = fid
+                            st.rerun()
+                with c_k2:
+                    st.markdown(
+                        f"""<button onclick="navigator.clipboard.writeText('{html.escape(video_id)}, {fid}'); this.innerText='✅';"
+                                   style="width:100%; font-size:0.75rem; padding:4px 0; background:#374151; color:white; border:none; border-radius:4px; cursor:pointer;"
+                                   title="Copy '{video_id}, {fid}'">📋</button>""",
+                        unsafe_allow_html=True,
+                    )
 
 
 # ---------------------------------------------------------------------------
