@@ -557,6 +557,9 @@ def show_video_dialog(
         f"### 📹 Video: `{video_id}` &nbsp;|&nbsp; Frame: `{current_fid}` &nbsp;|&nbsp; ⏱️ **{format_timestamp(ts)}** ({ts:.2f}s)"
     )
 
+    kfs_data = [{"fid": fid, "pts": get_frame_timestamp(video_id, fid, map_dir)} for fid in all_frames]
+    kfs_json_str = json.dumps(kfs_data)
+
     col_player, col_side = st.columns([3, 2], gap="medium")
 
     with col_player:
@@ -568,6 +571,136 @@ def show_video_dialog(
                 f"⚠️ Không tìm thấy file video `{video_id}.mp4` trong `{videos_root or 'data/raw/Videos'}`.\n\n"
                 f"Hãy đặt file video vào `data/raw/Videos/` để phát video trực tiếp."
             )
+
+        # Nút lấy số frame hiện tại (Ctrl + G) & HUD Script
+        hud_btn_html = f"""
+        <div style="margin: 8px 0;">
+            <button id="btn-get-frame-hud" onclick="window.triggerCaptureFrame('{html.escape(video_id)}', {html.escape(json.dumps(kfs_json_str))});"
+                    style="width: 100%; background: linear-gradient(135deg, #4f46e5 0%, #3730a3 100%); color: white;
+                           border: none; padding: 10px 16px; border-radius: 8px; font-weight: bold; cursor: pointer;
+                           font-size: 0.95rem; display: flex; align-items: center; justify-content: center; gap: 8px;
+                           box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25); transition: transform 0.1s, background 0.2s;">
+                <span>🎯</span>
+                <span>Lấy số Frame tại thời điểm này</span>
+                <span style="background: rgba(255,255,255,0.22); padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-family: monospace;">Ctrl + G</span>
+            </button>
+        </div>
+
+        <script>
+        (function() {{
+            function formatTime(sec) {{
+                if (isNaN(sec) || sec === null) return "00:00.00";
+                const m = Math.floor(sec / 60);
+                const s = Math.floor(sec % 60);
+                const ms = Math.floor((sec % 1) * 100);
+                return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0') + '.' + String(ms).padStart(2, '0');
+            }}
+
+            window.triggerCaptureFrame = function(vid, kfsJson) {{
+                const dialog = document.querySelector('div[data-testid="stDialog"]') || document.body;
+                const videoEl = dialog.querySelector('video') || document.querySelector('video');
+                if (!videoEl) {{
+                    alert("Không tìm thấy thẻ video đang phát.");
+                    return;
+                }}
+
+                const curTime = videoEl.currentTime || 0;
+                const fps = 25.0;
+                const calcFrame = Math.round(curTime * fps);
+                const timeStr = formatTime(curTime);
+
+                let closestKf = null;
+                let minDiff = 999999;
+                let kfsList = [];
+                try {{
+                    if (typeof kfsJson === 'string') {{
+                        kfsList = JSON.parse(kfsJson);
+                    }} else if (Array.isArray(kfsJson)) {{
+                        kfsList = kfsJson;
+                    }}
+                }} catch(e) {{}}
+
+                if (Array.isArray(kfsList) && kfsList.length > 0) {{
+                    for (const kf of kfsList) {{
+                        const kfSec = (typeof kf.pts === 'number') ? kf.pts : (kf.fid / fps);
+                        const diff = Math.abs(kfSec - curTime);
+                        if (diff < minDiff) {{
+                            minDiff = diff;
+                            closestKf = kf;
+                        }}
+                    }}
+                }}
+
+                const copyText = vid ? (vid + ", " + calcFrame) : String(calcFrame);
+                try {{
+                    navigator.clipboard.writeText(copyText);
+                }} catch(e) {{}}
+
+                let hud = document.getElementById("active-frame-hud");
+                if (!hud) {{
+                    hud = document.createElement("div");
+                    hud.id = "active-frame-hud";
+                    document.body.appendChild(hud);
+                }}
+
+                hud.innerHTML = `
+                    <div style="position: fixed; top: 60px; left: 50%; transform: translateX(-50%); z-index: 9999999;
+                                background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%); color: #ffffff;
+                                padding: 14px 22px; border-radius: 12px; box-shadow: 0 12px 35px rgba(0,0,0,0.6);
+                                border: 2px solid #818cf8; font-family: system-ui, -apple-system, sans-serif;
+                                display: flex; align-items: center; gap: 18px; min-width: 380px;">
+                        <div style="font-size: 2rem;">🎯</div>
+                        <div style="flex: 1;">
+                            <div style="font-size: 0.8rem; color: #a5b4fc; text-transform: uppercase; font-weight: bold; letter-spacing: 0.5px;">
+                                THỜI ĐIỂM VIDEO HIỆN TẠI (Ctrl+G)
+                            </div>
+                            <div style="font-size: 1.25rem; font-weight: bold; margin-top: 3px;">
+                                Frame: <span style="color: #fbbf24; font-size: 1.5rem; background: rgba(0,0,0,0.4); padding: 2px 10px; border-radius: 6px; font-family: monospace;">${{calcFrame}}</span>
+                                ${{vid ? `&nbsp;·&nbsp; <span style="color: #67e8f9;">${{vid}}</span>` : ''}}
+                            </div>
+                            <div style="font-size: 0.85rem; color: #cbd5e1; margin-top: 3px;">
+                                ⏱️ Mốc: <b>${{timeStr}}</b> (${{curTime.toFixed(2)}}s)
+                                ${{closestKf ? ` &nbsp;|&nbsp; Keyframe gần nhất: <b style="color:#93c5fd;">${{closestKf.fid}}</b> (lệch ${{minDiff.toFixed(2)}}s)` : ''}}
+                            </div>
+                        </div>
+                        <button onclick="navigator.clipboard.writeText('${{copyText}}'); this.innerText='✅ Đã Copy!';" 
+                                style="background: #4f46e5; color: white; border: none; padding: 10px 14px; border-radius: 8px;
+                                       font-weight: bold; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">
+                            📋 Copy (${{copyText}})
+                        </button>
+                        <button onclick="document.getElementById('active-frame-hud').remove();"
+                                style="background: transparent; color: #94a3b8; border: none; font-size: 1.3rem; cursor: pointer; padding: 0 4px;">
+                            ✕
+                        </button>
+                    </div>
+                `;
+
+                clearTimeout(window._hudTimer);
+                window._hudTimer = setTimeout(() => {{
+                    const el = document.getElementById("active-frame-hud");
+                    if (el) el.remove();
+                }}, 9000);
+            }};
+
+            // Bắt phím tắt Ctrl + G hoặc Cmd + G
+            if (!window._ctrlGAttached) {{
+                window._ctrlGAttached = true;
+                document.addEventListener('keydown', function(e) {{
+                    if ((e.ctrlKey || e.metaKey) && (e.key === 'g' || e.key === 'G')) {{
+                        e.preventDefault();
+                        const btn = document.getElementById('btn-get-frame-hud');
+                        if (btn) {{
+                            btn.click();
+                        }} else {{
+                            window.triggerCaptureFrame('', '[]');
+                        }}
+                    }}
+                }});
+            }}
+        }})();
+        </script>
+        """
+        st.markdown(hud_btn_html, unsafe_allow_html=True)
 
         asr_snippets = asr_lookup.get((video_id, current_fid), [])
         if asr_snippets:
