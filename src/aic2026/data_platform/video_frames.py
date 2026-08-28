@@ -23,7 +23,7 @@ class ExtractionReport:
 
 class OpenCLIPFrameEncoder:
     """Batch image encoder. Use the same CLIP checkpoint for image and query text embeddings."""
-    def __init__(self, model_name: str = "ViT-B-32", pretrained: str = "openai", device: str | None = None):
+    def __init__(self, model_name: str = "ViT-SO400M-14-SigLIP-384", pretrained: str = "webli", device: str | None = None):
         try:
             import open_clip
             import torch
@@ -250,7 +250,7 @@ def _load_csv_frame_indices(map_dir: Path | None, video_id: str) -> list[int] | 
             map_dir / f"{video_id}.csv",
             map_dir / "map-keyframes" / f"{video_id}.csv",
         ])
-    candidates.append(Path("D:/bachkhoa/ai_challenge/data/extracted/map-keyframes") / f"{video_id}.csv")
+    candidates.append(Path("D:/aichallenge/data/extracted/map-keyframes") / f"{video_id}.csv")
     p = next((c for c in candidates if c.exists()), None)
     if not p:
         return None

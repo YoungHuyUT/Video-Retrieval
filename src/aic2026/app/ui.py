@@ -42,32 +42,35 @@ def _detect_default_path(candidates: list[str]) -> str:
 
 
 DEFAULT_MANIFEST = _detect_default_path([
-    "data/processed/official_manifest.jsonl",
-    r"D:\bachkhoa\ai_challenge\data\processed\derived_manifest.jsonl",
+    "data/processed/siglip_manifest.jsonl",
+    r"D:\aichallenge\Video-Retrieval-feature-multimodal-asr-pipeline\data\processed\siglip_manifest.jsonl",
     "data/processed/derived_manifest.jsonl",
+    "data/processed/official_manifest.jsonl",
 ])
 DEFAULT_FEATURES = _detect_default_path([
-    "data/processed/official_features.npy",
-    r"D:\bachkhoa\ai_challenge\data\processed\derived_features.npy",
+    "data/processed/siglip_features.npy",
+    r"D:\aichallenge\Video-Retrieval-feature-multimodal-asr-pipeline\data\processed\siglip_features.npy",
     "data/processed/derived_features.npy",
+    "data/processed/official_features.npy",
 ])
 DEFAULT_ROOT = _detect_default_path([
-    r"D:\bachkhoa\ai_challenge\data\extracted\Keyframes",
-    r"D:\bachkhoa\ai_challenge\data\extracted",
+    r"D:\aichallenge\data\extracted\Keyframes",
+    r"D:\aichallenge\data\extracted",
     "data/raw/Keyframes",
     "data/processed",
 ])
 DEFAULT_VIDEOS_ROOT = _detect_default_path([
-    r"D:\bachkhoa\ai_challenge\data\extracted\Videos",
+    r"D:\aichallenge\data\extracted\Videos",
     "data/extracted/Videos",
     "data/raw/Videos",
 ])
 DEFAULT_MAP_KEYFRAMES = _detect_default_path([
-    r"D:\bachkhoa\ai_challenge\data\extracted\map-keyframes",
+    r"D:\aichallenge\data\extracted\map-keyframes",
     "data/extracted/map-keyframes",
     "data/raw/map-keyframes",
 ])
-DEFAULT_CLIP_MODEL = "ViT-L-14" if "derived" in DEFAULT_FEATURES else "ViT-B-32"
+DEFAULT_CLIP_MODEL = "ViT-SO400M-14-SigLIP-384"
+DEFAULT_CLIP_PRETRAINED = "webli"
 
 
 st.set_page_config(page_title="PEGASUS", layout="wide")
@@ -417,9 +420,9 @@ def resolve_keyframe_path(stored_path: str, root: Path) -> Path:
         for candidate in (
             root / rel,
             root / "Keyframes" / rel,
-            Path(r"D:\bachkhoa\ai_challenge\data\extracted\Keyframes") / rel,
-            Path(r"D:\bachkhoa\ai_challenge\data\extracted") / rel,
-            Path(r"D:\bachkhoa\ai_challenge\data\raw\Keyframes") / rel,
+            Path(r"D:\aichallenge\data\extracted\Keyframes") / rel,
+            Path(r"D:\aichallenge\data\extracted") / rel,
+            Path(r"D:\aichallenge\data\raw\Keyframes") / rel,
             Path.cwd() / rel,
             Path.cwd() / "data" / "raw" / rel,
             Path.cwd() / "data" / "extracted" / "Keyframes" / rel,
@@ -445,8 +448,8 @@ def event_keyframe_file(video_id: str, frame_id: int, lookup: dict[tuple[str, in
     for base in (
         root,
         root / "Keyframes",
-        Path(r"D:\bachkhoa\ai_challenge\data\extracted\Keyframes"),
-        Path(r"D:\bachkhoa\ai_challenge\data\extracted"),
+        Path(r"D:\aichallenge\data\extracted\Keyframes"),
+        Path(r"D:\aichallenge\data\extracted"),
         Path.cwd() / "data" / "raw" / "Keyframes",
     ):
         for pattern in (f"{frame_id:03d}.jpg", f"{frame_id:04d}.jpg", f"{frame_id}.jpg"):
@@ -499,8 +502,8 @@ def resolve_video_file(video_id: str, custom_root: str | Path | None = None) -> 
         roots.append(Path(custom_root))
     roots.extend([
         Path(DEFAULT_VIDEOS_ROOT),
-        Path(r"D:\bachkhoa\ai_challenge\data\extracted\Videos"),
-        Path(r"D:\bachkhoa\ai_challenge\data\raw\Videos"),
+        Path(r"D:\aichallenge\data\extracted\Videos"),
+        Path(r"D:\aichallenge\data\raw\Videos"),
         Path("data/extracted/Videos"),
         Path("data/raw/Videos"),
         Path("data/Videos"),
@@ -537,7 +540,7 @@ def get_single_video_pts_map(video_id: str, map_dir: str | Path | None = None) -
     roots = [
         Path(map_dir) if map_dir else Path(DEFAULT_MAP_KEYFRAMES),
         Path(DEFAULT_MAP_KEYFRAMES),
-        Path(r"D:\bachkhoa\ai_challenge\data\extracted\map-keyframes"),
+        Path(r"D:\aichallenge\data\extracted\map-keyframes"),
         Path("data/extracted/map-keyframes"),
         Path("data/raw/map-keyframes"),
     ]
@@ -1083,7 +1086,7 @@ if st.session_state.get("_run_agent"):
                     "manifest_path": st.session_state.get("cfg_manifest", DEFAULT_MANIFEST),
                     "features_path": st.session_state.get("cfg_features", DEFAULT_FEATURES),
                     "clip_model": st.session_state.get("cfg_clip_model", DEFAULT_CLIP_MODEL),
-                    "clip_pretrained": st.session_state.get("cfg_clip", "openai"),
+                    "clip_pretrained": st.session_state.get("cfg_clip", DEFAULT_CLIP_PRETRAINED),
                     "llm_model": st.session_state.get("cfg_llm", "qwen3.5:4b"),
                     "ollama_url": st.session_state.get("cfg_ollama", "http://127.0.0.1:11434"),
                     "metadata_filter": st.session_state.get("cfg_filter", ""),
@@ -1173,7 +1176,7 @@ with st.expander("Cấu hình nâng cao"):
     st.text_input("Feature .npy", DEFAULT_FEATURES, key="cfg_features")
     st.text_input("Root keyframe", DEFAULT_ROOT, key="cfg_root")
     st.text_input("CLIP model", DEFAULT_CLIP_MODEL, key="cfg_clip_model", help="ViT-B-32, ViT-L-14, ViT-L-14-quickgelu, ViT-B-16-SigLIP, ViT-SO400M-14-SigLIP-384")
-    st.text_input("CLIP pretrained", "openai", key="cfg_clip", help="openai, metaclip_fullcc, metaclip_400m, laion2b_s32b_b82k, webli")
+    st.text_input("CLIP pretrained", DEFAULT_CLIP_PRETRAINED, key="cfg_clip", help="openai, metaclip_fullcc, metaclip_400m, laion2b_s32b_b82k, webli")
     st.text_input("Ollama model", "qwen3.5:4b", key="cfg_llm")
     st.text_input("Ollama URL", "http://127.0.0.1:11434", key="cfg_ollama")
     st.text_input(

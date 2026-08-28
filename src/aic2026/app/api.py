@@ -61,8 +61,8 @@ class RuntimeConfig(BaseModel):
     """Cấu hình nội bộ; UI gửi để backend nạp đúng index/encoder."""
     manifest_path: str | None = None
     features_path: str | None = None
-    clip_model: str = "ViT-B-32"
-    clip_pretrained: str = "openai"
+    clip_model: str = "ViT-SO400M-14-SigLIP-384"
+    clip_pretrained: str = "webli"
     llm_model: str = "qwen3.5:4b"
     ollama_url: str = "http://127.0.0.1:11434"
     # The official CLIP matrix is static; FAISS is faster than starting a
@@ -120,7 +120,7 @@ def load_orchestrator(
     vlm_timeout: int = 120,
     coarse_top_k: int = 200,
     query_type: str | None = None,
-    clip_model: str = "ViT-B-32",
+    clip_model: str = "ViT-SO400M-14-SigLIP-384",
 ):
     """Shared layer: index + encoders load once per runtime configuration."""
     from aic2026.agent import OllamaLLM, RetrievalAgent

@@ -414,13 +414,13 @@ def test_openclip_reload_after_unload_keeps_encode_callable() -> None:
 
     enc = OpenCLIPTextEmbedder()
     before = enc.encode("a person speaking")
-    assert before.shape[0] == 512
+    assert before.shape[0] in (512, 768, 1152)
     enc.unload()
     assert enc.model is None
     enc.load()  # previously raised AttributeError: model_name
     assert enc.model is not None
     after = enc.encode("a person presenting")
-    assert after.shape[0] == 512
+    assert after.shape[0] in (512, 768, 1152)
     assert not (before == after).all()
 
 

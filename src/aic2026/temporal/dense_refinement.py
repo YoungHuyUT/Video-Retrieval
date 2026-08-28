@@ -86,7 +86,7 @@ def refine_trake_candidates(
             refined.append(candidate)
         video_path = video_root / f"{candidate.video_id}.mp4"
         if not video_path.exists():
-            for alt_root in (Path("data/extracted/Videos"), Path("data/raw/Videos"), Path("D:/bachkhoa/ai_challenge/data/extracted/Videos")):
+            for alt_root in (Path("data/extracted/Videos"), Path("data/raw/Videos"), Path("D:/aichallenge/data/extracted/Videos")):
                 alt_path = alt_root / f"{candidate.video_id}.mp4"
                 if alt_path.exists():
                     video_path = alt_path

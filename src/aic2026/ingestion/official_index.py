@@ -37,7 +37,7 @@ def _load_keyframe_frame_ids(map_root: Path | None, video_id: str) -> list[int] 
             map_root.parent / "map-keyframes" / f"{video_id}.csv",
             map_root.parent / "extracted" / "map-keyframes" / f"{video_id}.csv",
         ])
-    candidates.append(Path("D:/bachkhoa/ai_challenge/data/extracted/map-keyframes") / f"{video_id}.csv")
+    candidates.append(Path("D:/aichallenge/data/extracted/map-keyframes") / f"{video_id}.csv")
 
     csv_path = next((c for c in candidates if c.exists()), None)
     if csv_path is None:

@@ -94,11 +94,11 @@ def extract_keyframes(
     features_dir: Path = typer.Option(Path("data/processed/clip_features"), help="Thư mục output để ghi .npz/.npy embedding tự tạo (không phải thư mục CLIP features BTC đầu vào)"),
     cosine_threshold: float = typer.Option(0.985, min=0.0, max=1.0),
     batch_size: int = typer.Option(32, min=1),
-    clip_pretrained: str = typer.Option("openai", help="Checkpoint OpenCLIP: openai (chuẩn BTC) hoặc laion2b_s32b_b79k"),
+    clip_pretrained: str = typer.Option("webli", help="Checkpoint OpenCLIP: webli, openai, hoặc laion2b_s32b_b79k"),
 ) -> None:
     """Trích toàn bộ frame, CLIP-embed, rồi loại near-duplicate bằng cosine similarity."""
     from aic2026.data_platform import OpenCLIPFrameEncoder, extract_deduplicated_keyframes
-    image_encoder = OpenCLIPFrameEncoder(model_name="ViT-B-32", pretrained=clip_pretrained)
+    image_encoder = OpenCLIPFrameEncoder(model_name="ViT-SO400M-14-SigLIP-384", pretrained=clip_pretrained)
     report = extract_deduplicated_keyframes(video, keyframes_dir, features_dir, image_encoder, cosine_threshold, batch_size)
     typer.echo(json.dumps({"video_id": report.video_id, "decoded_frames": report.decoded_frames, "kept_frames": report.kept_frames, "keyframes": str(report.output_dir), "features": str(report.feature_path)}, ensure_ascii=False, indent=2))
 
@@ -121,8 +121,8 @@ def embed_keyframes(
     features_dir: Path = typer.Option(Path("data/processed/clip_features"), help="Thư mục output để ghi .npz/.npy embedding tự tạo (không phải thư mục CLIP features BTC đầu vào)"),
     manifest: Path = typer.Option(Path("data/processed/derived_manifest.jsonl"), help="Manifest output ở processed"),
     features: Path = typer.Option(Path("data/processed/derived_features.npy"), help="Feature index output ở processed"),
-    clip_model: str = typer.Option("ViT-B-32", help="Mô hình CLIP: ViT-B-32, ViT-L-14, ViT-L-14-quickgelu (MetaCLIP), ViT-B-16-SigLIP, ViT-SO400M-14-SigLIP-384"),
-    clip_pretrained: str = typer.Option("openai", help="Checkpoint: openai, metaclip_fullcc, metaclip_400m, laion2b_s32b_b82k, webli"),
+    clip_model: str = typer.Option("ViT-SO400M-14-SigLIP-384", help="Mô hình CLIP: ViT-SO400M-14-SigLIP-384, ViT-L-14, ViT-B-32, ViT-L-14-quickgelu, ViT-B-16-SigLIP"),
+    clip_pretrained: str = typer.Option("webli", help="Checkpoint: webli, openai, metaclip_fullcc, metaclip_400m, laion2b_s32b_b82k"),
     device: str = typer.Option("cuda", help="Thiết bị: cuda, cpu, hoặc auto"),
     batch_size: int = typer.Option(32, min=1, help="Số ảnh mỗi batch để encode trên GPU"),
     video_id: str | None = typer.Option(None, help="Chỉ encode 1 thư mục keyframe, ví dụ L21_V001"),
@@ -777,8 +777,8 @@ def agent_query(
     drop_empty_object_frames: bool = typer.Option(False, help="KIS: loại hẳn frame KHÔNG có vật thể nào (ảnh mờ, không entity đạt ngưỡng 0.4) khi query có hỏi vật thể. Giảm truy xuất đến frame nhiễu. Tắt nếu sợ mất recall."),
     trake_preferred_prefixes: str = typer.Option("", help="Ưu tiên (soft bias, KHÔNG loại trừ) TRAKE vào tiền tố video_id, cách nhau dấu phẩy (vd: L26). KIS/Q&A luôn xét TOÀN BỘ video. Để trống = mặc định ưu tiên L26. Truyền '.' để tắt ưu tiên."),
     translate: bool = typer.Option(False, help="Dịch VI→EN trước khi retrieval (CLIP là tiếng Anh). Mặc định tắt: dùng query nguyên bản."),
-    clip_model: str = typer.Option("ViT-B-32", help="Mô hình CLIP (ViT-B-32, ViT-L-14, ViT-L-14-quickgelu, ViT-B-16-SigLIP, ViT-SO400M-14-SigLIP-384)"),
-    clip_pretrained: str = typer.Option("openai", help="Checkpoint (openai, metaclip_fullcc, metaclip_400m, laion2b_s32b_b82k, webli)"),
+    clip_model: str = typer.Option("ViT-SO400M-14-SigLIP-384", help="Mô hình CLIP (ViT-SO400M-14-SigLIP-384, ViT-L-14, ViT-B-32, ViT-L-14-quickgelu, ViT-B-16-SigLIP)"),
+    clip_pretrained: str = typer.Option("webli", help="Checkpoint (webli, openai, metaclip_fullcc, metaclip_400m, laion2b_s32b_b82k)"),
     output: Path | None = typer.Option(None),
 ) -> None:
     """Run the bounded local-LLM agent and save auditable candidates/trace."""
