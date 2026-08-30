@@ -12,6 +12,47 @@ _DEFAULT_PROMPT_TEMPLATES = (
 )
 
 
+class MultilingualSemanticTextEmbedder:
+    """Lightweight multilingual semantic encoder for Vietnamese text queries.
+
+    This is intentionally optional: the project keeps the main CLIP branch for
+    visual retrieval, while this helper offers a stronger semantic text signal
+    for Vietnamese queries when a sentence-transformers model is available.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "intfloat/multilingual-e5-base",
+        device: str | None = None,
+    ) -> None:
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:  # pragma: no cover - import-time dependency guard
+            raise RuntimeError(
+                "Install model extras: uv sync --extra models"
+            ) from exc
+
+        self.model_name = model_name
+        self.device = device or ("cuda" if __import__("torch").cuda.is_available() else "cpu")
+        self.model = SentenceTransformer(model_name, device=self.device)
+
+    def encode(self, text: str) -> np.ndarray:
+        clean_text = (text or "").strip()
+        if not clean_text:
+            return np.zeros(self.model.get_sentence_embedding_dimension(), dtype=np.float32)
+        vec = self.model.encode(clean_text, normalize_embeddings=True, convert_to_numpy=True)
+        return np.asarray(vec, dtype=np.float32).reshape(-1)
+
+    def unload(self) -> None:
+        self.model = None
+
+    def load(self) -> None:
+        if self.model is not None:
+            return
+        from sentence_transformers import SentenceTransformer
+        self.model = SentenceTransformer(self.model_name, device=self.device)
+
+
 class OpenCLIPTextEmbedder:
     """Text encoder matching CLIP features with multi-template prompt ensembling."""
     def __init__(

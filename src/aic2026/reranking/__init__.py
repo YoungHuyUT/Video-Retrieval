@@ -11,6 +11,7 @@ from .lexical import (
     object_evidence_adjustment,
     rerank_with_metadata,
     rerank_with_object_evidence,
+    rerank_with_semantic_text,
     rrf_fuse,
     rrf_rank,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "object_evidence_adjustment",
     "rerank_with_metadata",
     "rerank_with_object_evidence",
+    "rerank_with_semantic_text",
     "rerank_with_colour_evidence",
     "query_colours",
     "rrf_fuse",

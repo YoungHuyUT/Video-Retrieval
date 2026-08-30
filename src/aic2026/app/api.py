@@ -125,7 +125,7 @@ def load_orchestrator(
     """Shared layer: index + encoders load once per runtime configuration."""
     from aic2026.agent import OllamaLLM, RetrievalAgent
     from aic2026.agent.tools import RetrievalTools
-    from aic2026.embeddings import OpenCLIPTextEmbedder
+    from aic2026.embeddings import MultilingualSemanticTextEmbedder, OpenCLIPTextEmbedder
     from aic2026.ingestion import load_manifest
     from aic2026.retrieval import RetrievalPipeline
     from aic2026.retrieval.factory import load_index_for_query
@@ -162,6 +162,12 @@ def load_orchestrator(
     tools = RetrievalTools(
         pipeline, text_encoder.encode, encode_images=text_encoder.encode_images
     )
+    try:
+        multilingual_encoder = MultilingualSemanticTextEmbedder()
+        tools.semantic_encoder = multilingual_encoder.encode
+        tools.semantic_rerank_weight = 0.12
+    except Exception:
+        multilingual_encoder = None
     tools.coarse_top_k = coarse_top_k
     tools.video_filter_terms = [t.strip() for t in metadata_filter.split(",") if t.strip()] or None
     tools.late_interaction_weight = late_interaction_weight

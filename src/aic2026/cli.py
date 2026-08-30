@@ -784,7 +784,7 @@ def agent_query(
     """Run the bounded local-LLM agent and save auditable candidates/trace."""
     from aic2026.agent import OllamaLLM, RetrievalAgent
     from aic2026.agent.tools import RetrievalTools
-    from aic2026.embeddings import OpenCLIPTextEmbedder
+    from aic2026.embeddings import MultilingualSemanticTextEmbedder, OpenCLIPTextEmbedder
     from aic2026.ingestion import load_manifest
     from aic2026.retrieval import RetrievalPipeline
     from aic2026.retrieval.factory import load_index_for_query
@@ -817,6 +817,12 @@ def agent_query(
     text_encoder = OpenCLIPTextEmbedder(model_name=clip_model, pretrained=clip_pretrained)
     encode_text = text_encoder.encode
     tools = RetrievalTools(pipeline, encode_text, encode_images=text_encoder.encode_images)
+    try:
+        multilingual_encoder = MultilingualSemanticTextEmbedder()
+        tools.semantic_encoder = multilingual_encoder.encode
+        tools.semantic_rerank_weight = 0.12
+    except Exception:
+        multilingual_encoder = None
     # coarse_top_k áp dụng cho cả KIS (video-level rerank) và TRAKE (DP coarse
     # filter). TRAKE dùng agent.coarse_top_k; KIS dùng tools.coarse_top_k.
     tools.coarse_top_k = coarse_top_k

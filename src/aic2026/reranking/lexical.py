@@ -588,3 +588,70 @@ def rerank_with_metadata(
         reranked.append(item.model_copy(update={"score": blended}))
 
     return sorted(reranked, key=lambda c: c.score, reverse=True)
+
+
+def rerank_with_semantic_text(
+    query: str,
+    candidates: list[Candidate],
+    records: dict[int, FrameRecord],
+    encode_text,
+    weight: float = 0.12,
+) -> list[Candidate]:
+    """Use an optional multilingual text encoder to add a bounded semantic bonus.
+
+    This helper preserves the existing CLIP branch and only gives extra lift when
+    a semantic encoder is available. It compares the query embedding to a compact
+    text bag built from metadata + object labels and nudges candidates whose
+    underlying scene text matches the query semantically, even when the wording
+    differs from the original CLIP prompt.
+    """
+    if not candidates or weight <= 0 or encode_text is None:
+        return sorted(candidates, key=lambda c: c.score, reverse=True)
+
+    query_text = (query or "").strip()
+    if not query_text:
+        return sorted(candidates, key=lambda c: c.score, reverse=True)
+
+    q_vec = np.asarray(encode_text(query_text), dtype=np.float32).reshape(-1)
+    if q_vec.size == 0:
+        return sorted(candidates, key=lambda c: c.score, reverse=True)
+
+    reranked: list[Candidate] = []
+    for item in candidates:
+        base_score = float(item.score)
+        if item.vector_id is None:
+            reranked.append(item.model_copy(update={"score": base_score}))
+            continue
+
+        record = records.get(item.vector_id)
+        if record is None:
+            reranked.append(item.model_copy(update={"score": base_score}))
+            continue
+
+        parts: list[str] = []
+        parts.extend(record.object_labels or [])
+        if getattr(record, "metadata_keywords", None):
+            parts.extend(record.metadata_keywords)
+        if getattr(record, "asr_text", None):
+            parts.extend(record.asr_text)
+        if not parts:
+            reranked.append(item.model_copy(update={"score": base_score}))
+            continue
+
+        haystack = " ".join(part for part in parts if isinstance(part, str))
+        if not haystack.strip():
+            reranked.append(item.model_copy(update={"score": base_score}))
+            continue
+
+        text_vec = np.asarray(encode_text(haystack), dtype=np.float32).reshape(-1)
+        norm_q = np.linalg.norm(q_vec)
+        norm_t = np.linalg.norm(text_vec)
+        if norm_q <= 1e-12 or norm_t <= 1e-12:
+            reranked.append(item.model_copy(update={"score": base_score}))
+            continue
+
+        sim = float(np.dot(q_vec, text_vec) / (norm_q * norm_t))
+        blended = base_score + weight * max(0.0, min(1.0, sim))
+        reranked.append(item.model_copy(update={"score": blended}))
+
+    return sorted(reranked, key=lambda c: c.score, reverse=True)

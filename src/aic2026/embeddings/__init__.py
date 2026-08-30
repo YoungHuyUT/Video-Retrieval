@@ -1,3 +1,3 @@
-from .text import OpenCLIPTextEmbedder
+from .text import MultilingualSemanticTextEmbedder, OpenCLIPTextEmbedder
 
-__all__ = ["OpenCLIPTextEmbedder"]
+__all__ = ["OpenCLIPTextEmbedder", "MultilingualSemanticTextEmbedder"]

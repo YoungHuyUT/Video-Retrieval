@@ -21,6 +21,7 @@ from aic2026.reranking import (
     object_evidence_adjustment,
     rerank_with_metadata,
     rerank_with_object_evidence,
+    rerank_with_semantic_text,
 )
 from aic2026.retrieval import RetrievalPipeline
 from aic2026.temporal import align_events, refine_trake_candidates
@@ -58,6 +59,8 @@ class RetrievalTools:
     vlm_device: str | None = None
     vlm_dtype: str = "float32"
     encode_images: Callable[[list[object]], np.ndarray] | None = None
+    semantic_encoder: Callable[[str], np.ndarray] | None = None
+    semantic_rerank_weight: float = 0.12
     bm25_index: BM25Index | None = None
     # Trọng số metadata bonus (Direction B): nhỏ, cộng trực tiếp lên RRF gốc
     # (KHÔNG normalize). RRF base ~0.01-0.03; weight 0.01 → bonus tối đa +0.01,
@@ -259,6 +262,14 @@ class RetrievalTools:
             records=self._record_lookup(),
             weight=self.rerank_weight,
         )
+        if self.semantic_encoder is not None and self.semantic_rerank_weight > 0:
+            candidates = rerank_with_semantic_text(
+                query=queries[0],
+                candidates=candidates,
+                records=self._record_lookup(),
+                encode_text=self.semantic_encoder,
+                weight=self.semantic_rerank_weight,
+            )
         # Object detector evidence is a stronger, signed signal than generic
         # lexical overlap: an exact/synonym match is promoted; a known object
         # mismatch is softly penalized.  No advanced UI field is required.
