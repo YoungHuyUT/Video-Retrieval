@@ -138,6 +138,37 @@ def test_tools_use_diversified_candidates_for_kis() -> None:
     assert len(first_video_candidates) == 2
 
 
+def test_kis_action_chain_adds_event_recall_branches() -> None:
+    encoded: list[str] = []
+
+    def encode(text: str) -> np.ndarray:
+        encoded.append(text)
+        return np.asarray([1.0, 0.0], dtype=np.float32)
+
+    tools = RetrievalTools(pipeline=build_pipeline(), encode_text=encode)
+    tools.retrieve("a person enters a room, opens a door, then sits down", limit=5, task_type="kis")
+    # Global query is retained, while every action gets an independent recall
+    # branch. This is intentionally weaker than TRAKE's ordered alignment.
+    assert len(encoded) >= 3
+    assert any("opens" in query for query in encoded)
+
+
+def test_kis_long_action_chain_has_bounded_retrieval_cost() -> None:
+    encoded: list[str] = []
+    tools = RetrievalTools(
+        pipeline=build_pipeline(),
+        encode_text=lambda text: (encoded.append(text) or np.asarray([1.0, 0.0], dtype=np.float32)),
+    )
+    tools.retrieve(
+        "a person enters a room, opens a door, walks to a table, picks up a book, reads it, then sits down",
+        limit=5,
+        task_type="kis",
+    )
+    # Bounded cost: one global view plus action-branch variants (fine_details
+    # may add 1-2 extra detail queries, but total stays well under the chain length).
+    assert len(encoded) <= 6
+
+
 def test_tools_use_raw_candidates_for_trake() -> None:
     tools = RetrievalTools(
         pipeline=build_pipeline(),
@@ -183,7 +214,11 @@ def test_tools_use_raw_candidates_for_qa() -> None:
         if candidate.video_id == "L01_V001"
     ]
 
-    assert len(first_video_candidates) == 4
+    # QA inherits the video-level rerank introduced in 4887e92 ("fix QA & TRAKE"):
+    # candidates are aggregated per video and capped to `frames_per_video` (2 in
+    # build_pipeline) so the VLM only answers frames from the strongest videos.
+    # The raw pool holds 4 frames for L01_V001; after rerank only 2 survive.
+    assert len(first_video_candidates) == 2
 
 def build_trake_pipeline() -> RetrievalPipeline:
     vectors = np.asarray(
@@ -282,6 +317,57 @@ def test_trake_ranks_video_with_correct_event_order_first() -> None:
             strict=False,
         )
     )
+
+
+def test_trake_decay_off_is_identical_to_baseline() -> None:
+    # Phase 6: the opt-in decay/beam params must leave the OFF path byte-for-byte
+    # identical to the legacy call (baseline A for A/B).
+    pipeline = build_trake_pipeline()
+    events = np.eye(3, dtype=np.float32)
+
+    baseline = pipeline.retrieve_trake(
+        event_embeddings=events,
+        top_videos=2,
+        prefilter_frames_per_event=6,
+    )
+    decay = pipeline.retrieve_trake(
+        event_embeddings=events,
+        top_videos=2,
+        prefilter_frames_per_event=6,
+        use_temporal_decay=True,
+        temporal_decay_alpha=0.01,
+    )
+
+    assert [c.video_id for c in baseline] == [c.video_id for c in decay]
+    assert [c.event_frames for c in baseline] == [c.event_frames for c in decay]
+
+
+def test_trake_decay_returns_valid_monotonic_alignment() -> None:
+    # Phase 6: with decay ON the alignment must still be a valid, strictly
+    # increasing per-event frame assignment (no broken path).
+    pipeline = build_trake_pipeline()
+    events = np.eye(3, dtype=np.float32)
+
+    candidates = pipeline.retrieve_trake(
+        event_embeddings=events,
+        top_videos=2,
+        prefilter_frames_per_event=6,
+        use_temporal_decay=True,
+        temporal_decay_alpha=0.05,
+    )
+
+    assert len(candidates) == 2
+    for candidate in candidates:
+        assert candidate.event_frames is not None
+        assert len(candidate.event_frames) == 3
+        assert all(
+            previous < current
+            for previous, current in zip(
+                candidate.event_frames,
+                candidate.event_frames[1:],
+                strict=False,
+            )
+        )
 
 
 def test_trake_returns_one_candidate_per_video() -> None:
@@ -504,6 +590,9 @@ def test_tools_retrieve_applies_video_rerank_for_kis() -> None:
         pipeline=pipeline,
         encode_text=lambda _: np.asarray([1.0, 0.0], dtype=np.float32),
     )
+    tools.use_long_query_expansion = False  # isolate video-rerank from expansion
+    tools.use_fast_kis = False  # disable fast shortcut to test full pipeline including video rerank
+    tools.fusion_mode = "rrf_baseline"  # disable adaptive fusion so video rerank ordering is preserved
 
     candidates = tools.retrieve(
         query="a person speaking",
@@ -528,5 +617,7 @@ def test_tools_retrieve_skips_video_rerank_for_qa() -> None:
         limit=8,
         task_type="qa",
     )
-    # QA retains per-video frames without the KIS video-level coarse cap.
-    assert sum(1 for c in candidates if c.video_id == "V_CORRECT") == 4
+    # QA inherits the video-level rerank introduced in 4887e92 ("fix QA & TRAKE"):
+    # the raw pool of 4 V_CORRECT frames is capped to `frames_per_video` (2 in
+    # build_kis_pipeline) so the VLM only consumes the strongest video's top frames.
+    assert sum(1 for c in candidates if c.video_id == "V_CORRECT") == 2

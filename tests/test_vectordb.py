@@ -46,6 +46,17 @@ def test_search_returns_manifest_indices_matching_faiss(tmp_path: Path) -> None:
     assert np.allclose(chroma_scores, faiss_scores, atol=1e-3)
 
 
+def test_batched_search_matches_individual_searches() -> None:
+    index = VectorIndex(_sample_vectors(n=24, dim=4))
+    queries = _sample_vectors(n=3, dim=4)
+    batched = index.search_many(queries, 5)
+    assert len(batched) == len(queries)
+    for query, (ids, scores) in zip(queries, batched):
+        expected_ids, expected_scores = index.search(query, 5)
+        assert np.array_equal(ids, expected_ids)
+        assert np.allclose(scores, expected_scores)
+
+
 def test_chroma_id_maps_to_vector_id(tmp_path: Path) -> None:
     manifest = _sample_manifest()
     chroma = ChromaVectorStore(_sample_vectors(), manifest, persist_dir=tmp_path)

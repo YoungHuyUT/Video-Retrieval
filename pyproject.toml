@@ -1,52 +1,75 @@
+# Khai báo dependency chính thức của dự án.
+# Docker / uv đọc file này — không có nó thì image không biết cài gì.
+# Nội dung khớp với src/aic2026.egg-info/requires.txt + uv.lock.
+
 [project]
 name = "aic2026"
 version = "0.1.0"
 description = "Video retrieval, VQA, and temporal alignment starter for AIC 2026"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
 dependencies = [
-  "numpy>=1.26",
-  "pydantic>=2.7",
-  "pyyaml>=6.0",
-  "typer>=0.12",
-  "fastapi>=0.115",
-  "uvicorn>=0.30",
-  "streamlit>=1.36",
-  "httpx>=0.27",
-  "rank-bm25>=0.2",
+    "numpy>=1.26",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "streamlit>=1.36",
+    "httpx>=0.27",
+    "rank-bm25>=0.2",
+    "diskcache>=5.6",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
-retrieval = ["faiss-cpu>=1.8", "chromadb>=0.5"]
-models = ["torch>=2.3", "open-clip-torch>=2.24", "transformers>=4.49", "qwen-vl-utils>=0.0.8"]
-video = ["opencv-python-headless>=4.10", "pillow>=10.0"]
+# Dense retrieval + Chroma (API dùng numpy backend + FAISS IVFPQ)
+retrieval = [
+    "faiss-cpu>=1.8",
+    "chromadb>=0.5",
+]
+# SigLIP2 / Florence-2 / OpenCLIP — torch CPU đủ chạy text encoder
+models = [
+    "torch>=2.3",
+    "open-clip-torch>=2.24",
+    "transformers>=4.49",
+    "sentencepiece>=0.2",
+    "qwen-vl-utils>=0.0.8",
+    "sentence-transformers>=3.0",
+]
+# Keyframe decode / scenedetect
+video = [
+    "opencv-python-headless>=4.10",
+    "pillow>=10.0",
+    "scenedetect[opencv]>=0.6.4",
+]
+# ASR (tùy chọn — không bắt buộc cho KIS/QA/TRAKE core)
+asr = [
+    "faster-whisper>=1.0",
+]
+# Reserved — không có package riêng
 agent = []
-dev = ["pytest>=8.2", "ruff>=0.6"]
+dev = [
+    "pytest>=8.2",
+    "ruff>=0.6",
+    "pdfplumber>=0.11.10",
+]
 
 [project.scripts]
+# CLI: `aic2026 serve`, `aic2026 agent-query`, ...
 aic2026 = "aic2026.cli:app"
 
+[project.urls]
+Repository = "https://github.com/<ten-ban>/AIC2026"
+
 [build-system]
-requires = ["setuptools>=70"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+# src-layout: package nằm ở src/aic2026/
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.package-data]
-"aic2026.agent" = ["templates/*.md"]
-
 [tool.pytest.ini_options]
-pythonpath = ["src"]
 testpaths = ["tests"]
-
-[tool.ruff]
-line-length = 100
-
-[tool.ruff.lint.per-file-ignores]
-# `typer.Option(...)` in argument defaults is the canonical Typer pattern.
-"src/aic2026/cli.py" = ["B008", "B006"]
-
-[dependency-groups]
-dev = [
-    "pdfplumber>=0.11.10",
-]

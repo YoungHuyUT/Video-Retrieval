@@ -136,7 +136,16 @@ class OllamaLLM:
             response.raise_for_status()
 
             response_payload = response.json()
-            content = response_payload["message"]["content"]
+            message = response_payload["message"]
+            # Some models (e.g. reasoning-tuned qwen3 variants configured with
+            # think=False) emit the answer inside ``thinking``/``reasoning_content``
+            # while leaving ``content`` empty.  Fall back to those fields so a valid
+            # plan is not discarded as an empty payload.
+            content = message.get("content") or ""
+            if not content.strip():
+                content = message.get("reasoning_content") or message.get("thinking") or ""
+            if not content.strip():
+                raise KeyError("empty content")
 
         except httpx.HTTPError as exc:
             raise LLMInvocationError(

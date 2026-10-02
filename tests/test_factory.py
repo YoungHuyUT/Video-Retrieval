@@ -71,3 +71,13 @@ def test_explicit_faiss_backend(tmp_path: Path) -> None:
     manifest = _sample_manifest()
     index = load_index_for_query(features, manifest, backend="faiss", chroma_dir=tmp_path / "chroma")
     assert isinstance(index, VectorIndex)
+    # `faiss` must be the in-RAM path; an mmap matrix intentionally disables
+    # FAISS and falls back to a full NumPy scan.
+    assert index.vectors.flags.writeable
+
+
+def test_explicit_numpy_backend_uses_low_memory_mmap(tmp_path: Path) -> None:
+    features = _write_features(tmp_path)
+    index = load_index_for_query(features, _sample_manifest(), backend="numpy")
+    assert isinstance(index, VectorIndex)
+    assert not index.vectors.flags.writeable

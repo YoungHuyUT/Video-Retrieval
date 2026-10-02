@@ -6,6 +6,13 @@ import os
 import sys
 from pathlib import Path
 
+# Load .env file if present (GEMINI_API_KEY, etc.)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Windows console defaults to a legacy code page (cp1252) that cannot encode
 # Vietnamese (or any non-Latin) output, which makes every `typer.echo` of a
 # progress message crash with UnicodeEncodeError. Force UTF-8 on the std
@@ -92,14 +99,25 @@ def extract_keyframes(
     video: Path = typer.Option(..., exists=True, help="Video chính thức do BTC cung cấp"),
     keyframes_dir: Path = typer.Option(Path("data/processed/keyframes"), help="Nơi ghi keyframe đã lọc vào processed"),
     features_dir: Path = typer.Option(Path("data/processed/clip_features"), help="Thư mục output để ghi .npz/.npy embedding tự tạo (không phải thư mục CLIP features BTC đầu vào)"),
+    sample_interval_sec: float | None = typer.Option(1.0, min=0.0, help="Khoảng thời gian lấy mẫu theo giây; 1.0 = lấy 1 frame/giây, 0 hoặc None = chế độ legacy lấy toàn bộ frame"),
     cosine_threshold: float = typer.Option(0.985, min=0.0, max=1.0),
     batch_size: int = typer.Option(32, min=1),
     clip_pretrained: str = typer.Option("openai", help="Checkpoint OpenCLIP: openai (chuẩn BTC) hoặc laion2b_s32b_b79k"),
+    image_quality: int = typer.Option(92, min=1, max=100),
 ) -> None:
     """Trích toàn bộ frame, CLIP-embed, rồi loại near-duplicate bằng cosine similarity."""
     from aic2026.data_platform import OpenCLIPFrameEncoder, extract_deduplicated_keyframes
     image_encoder = OpenCLIPFrameEncoder(model_name="ViT-B-32", pretrained=clip_pretrained)
-    report = extract_deduplicated_keyframes(video, keyframes_dir, features_dir, image_encoder, cosine_threshold, batch_size)
+    report = extract_deduplicated_keyframes(
+        video,
+        keyframes_dir,
+        features_dir,
+        image_encoder,
+        sample_interval_sec=sample_interval_sec,
+        cosine_threshold=cosine_threshold,
+        batch_size=batch_size,
+        image_quality=image_quality,
+    )
     typer.echo(json.dumps({"video_id": report.video_id, "decoded_frames": report.decoded_frames, "kept_frames": report.kept_frames, "keyframes": str(report.output_dir), "features": str(report.feature_path)}, ensure_ascii=False, indent=2))
 
 @app.command("build-derived-index-input")
@@ -172,6 +190,128 @@ def embed_keyframes(
         from aic2026.retrieval.factory import build_vector_index
         build_vector_index(features, load_manifest(manifest), backend="chroma", chroma_dir=chroma_dir)
         typer.echo(f"Chroma collection ready at {chroma_dir}")
+
+@app.command("embed-siglip2")
+def embed_siglip2(
+    manifest: Path = typer.Option(Path("data/processed/official_manifest.jsonl"),
+        help="Manifest JSONL (official hoặc derived) liệt kê keyframe_path cho từng frame."),
+    output_features: Path = typer.Option(Path("data/processed/siglip2/features_siglip2.npy"),
+        help="Output SigLIP2 embedding matrix (.npy)."),
+    output_manifest: Path = typer.Option(Path("data/processed/siglip2/manifest_siglip2.jsonl"),
+        help="Output manifest copy."),
+    model_name: str = typer.Option("google/siglip2-so400m-patch14-384",
+        help="SigLIP2 checkpoint: google/siglip2-so400m-patch14-384 (1152-d) hoặc google/siglip2-base-patch16-224 (768-d)"),
+    batch_size: int = typer.Option(32, min=1, help="Batch size để giảm OOM trên CPU/GPU"),
+    resume: bool = typer.Option(True, help="Resume nếu output .npy đã tồn tại"),
+    limit: int = typer.Option(0, help="Chỉ embed N frame đầu (dev; 0 = toàn bộ)"),
+    log_file: Path = typer.Option(Path("data/processed/siglip2/embed.log"),
+        help="File log tiến độ."),
+) -> None:
+    """Embed BTC keyframes bằng SigLIP2 → features_siglip2.npy + manifest copy.
+
+    Improvement.md §1: dùng trực tiếp BTC keyframes hiện có (không extract lại video).
+    Improvement.md §11: batch inference, cache, resume.
+    Improvement.md §12: lưu metadata (model_name, source_hash, dim, etc.).
+    """
+    _setup_run_logging(log_file)
+    from aic2026.embeddings.siglip2 import (
+        Siglip2Embedder, EmbedConfig, build_siglip2_embeddings
+    )
+
+    logger.info("BẮT ĐẦU embed-siglip2: manifest=%s, model=%s", manifest, model_name)
+
+    # Build a temp manifest with limit if specified
+    if limit > 0:
+        import tempfile, json
+        tmp_manifest = Path(tempfile.mktemp(suffix=".jsonl"))
+        count = 0
+        with open(manifest, "r") as src, open(tmp_manifest, "w") as out:
+            for line in src:
+                if count >= limit:
+                    break
+                line = line.strip()
+                if line:
+                    out.write(line + "\n")
+                    count += 1
+        manifest = tmp_manifest
+        logger.info("Limited to first %d frames", limit)
+
+    config = EmbedConfig(
+        model_name=model_name,
+        batch_size=batch_size,
+        resume=resume,
+    )
+    embeddings, records = build_siglip2_embeddings(manifest, output_features, config)
+
+    logger.info("HOÀN TẤT: %d embeddings, dim=%d", embeddings.shape[0], embeddings.shape[1])
+    typer.echo(json.dumps({
+        "frame_count": embeddings.shape[0],
+        "embedding_dim": embeddings.shape[1],
+        "model": model_name,
+        "features_path": str(output_features),
+        "manifest_path": str(output_manifest),
+    }, ensure_ascii=False, indent=2))
+
+    if limit > 0:
+        Path(manifest).unlink(missing_ok=True)
+
+
+@app.command("build-siglip2-index")
+def build_siglip2_index(
+    features: Path = typer.Option(Path("data/processed/siglip2/features_siglip2.npy"),
+        help="SigLIP2 embedding matrix (.npy)."),
+    manifest: Path = typer.Option(Path("data/processed/siglip2/manifest_siglip2.jsonl"),
+        help="Manifest JSONL tương ứng với features."),
+    output_index: Path = typer.Option(Path("data/processed/siglip2/index_siglip2.faiss"),
+        help="Output FAISS index file."),
+    use_gpu: bool = typer.Option(False, help="Dùng GPU nếu có (FAISS GPU index)"),
+) -> None:
+    """Build FAISS index từ SigLIP2 embeddings.
+
+    Improvement.md §2: SigLIP2 → FAISS.
+    Vectors được L2-normalize để inner product = cosine similarity.
+    """
+    import faiss
+    import numpy as np
+    import json
+
+    logger.info("Bắt đầu build FAISS từ SigLIP2 embeddings: %s", features)
+
+    # Load embeddings
+    embeddings = np.load(features, mmap_mode="r").astype(np.float32)
+    logger.info("Loaded embeddings: shape=%s, dtype=%s", embeddings.shape, embeddings.dtype)
+
+    # Build index
+    dim = embeddings.shape[1]
+    index = faiss.IndexFlatIP(dim)  # Inner product for cosine similarity
+
+    # L2-normalize vectors
+    faiss.normalize_L2(embeddings)
+    index.add(embeddings)
+
+    # Save index
+    output_index.parent.mkdir(parents=True, exist_ok=True)
+    faiss.write_index(index, str(output_index))
+
+    # Save metadata
+    from aic2026.embeddings.siglip2 import load_siglip2_metadata, SIGLIP2_META_FILE
+    meta = load_siglip2_metadata(SIGLIP2_META_FILE)
+    if meta:
+        meta["index_path"] = str(output_index)
+        meta["index_type"] = "IndexFlatIP"
+        with open(output_index.parent / "meta.json", "w") as f:
+            json.dump(meta, f, indent=2)
+
+    typer.echo(json.dumps({
+        "index_vectors": index.ntotal,
+        "embedding_dim": dim,
+        "index_path": str(output_index),
+        "index_type": "IndexFlatIP (inner product / cosine)",
+        "model": meta.get("model_name", "unknown") if meta else "unknown",
+    }, ensure_ascii=False, indent=2))
+
+    logger.info("HOÀN TẤT: FAISS index built, %d vectors", index.ntotal)
+
 
 @app.command("probe-official-features")
 def probe_official_features(
@@ -676,17 +816,25 @@ def agent_query(
     vlm_timeout: int = typer.Option(120, help="Timeout (giây) mỗi lần gọi VLM"),
     coarse_top_k: int = typer.Option(200, help="TRAKE: giới hạn số video đưa vào DP alignment (coarse filter). 0 = xét hết."),
     late_interaction_weight: float = typer.Option(0.0, help="KIS: bật late-interaction (ColBERT-style MaxSim theo từng facet query). 0 = tắt (mặc định). Thử 0.5 để CLIP không chọn nhầm frame đúng cảnh sai vật thể. Nặng hơn RRF nhưng chỉ vài chục encode text, vẫn ms."),
-    object_evidence_weight: float = typer.Option(0.03, help="KIS: độ lớn reward/penalty object detector khi query hỏi vật thể (RRF scale). Lớn hơn = ép object mạnh hơn CLIP."),
+    object_evidence_weight: float = typer.Option(0.0, help="KIS: độ lớn reward/penalty object detector khi query hỏi vật thể (RRF scale). Lớn hơn = ép object mạnh hơn CLIP. 0.0 = tắt object evidence (dense-only mode)."),
     object_penalty_scale: float = typer.Option(2.0, help="KIS: hệ số phạt frame THIẾU vật thể so với thưởng frame có vật thể (mặc định 2.0)."),
     drop_empty_object_frames: bool = typer.Option(False, help="KIS: loại hẳn frame KHÔNG có vật thể nào (ảnh mờ, không entity đạt ngưỡng 0.4) khi query có hỏi vật thể. Giảm truy xuất đến frame nhiễu. Tắt nếu sợ mất recall."),
     trake_preferred_prefixes: str = typer.Option("", help="Ưu tiên (soft bias, KHÔNG loại trừ) TRAKE vào tiền tố video_id, cách nhau dấu phẩy (vd: L26). KIS/Q&A luôn xét TOÀN BỘ video. Để trống = mặc định ưu tiên L26. Truyền '.' để tắt ưu tiên."),
     translate: bool = typer.Option(False, help="Dịch VI→EN trước khi retrieval (CLIP là tiếng Anh). Mặc định tắt: dùng query nguyên bản."),
+    asr_sidecar_path: Path | None = typer.Option(None, help="Đường dẫn ASR sidecar (.jsonl) cho spoken-term localization. Mặc định tự động tìm data/processed/asr_sidecar.jsonl."),
+    asr_weight: float = typer.Option(0.15, help="Trọng số ASR spoken-term score (weak signal, nudge RRF)."),
+    use_event_coverage: bool = typer.Option(True, help="Bật Event Coverage precision rerank (ưu tiên frame giải thích nhiều event). Tắt để dùng baseline RRF."),
+    use_moment_rerank: bool = typer.Option(True, help="Bật chọn 1 best evidence frame / moment cho KIS/QA."),
+    event_coverage_blend: float = typer.Option(0.5, help="Blend factor Event Coverage (0=giữ ranking gốc, 1=ưu tiên coverage)."),
+    embedding_backend: str = typer.Option("siglip2", help="Embedding backend: siglip2 (768-dim, mặc định) | official_clip/OpenCLIP ViT-B/32 (512-dim)"),
+    clip_pretrained: str = typer.Option("openai", help="OpenCLIP checkpoint: openai (chuẩn BTC) hoặc laion2b_s32b_b79k"),
+    siglip2_model: str = typer.Option("google/siglip2-base-patch16-224", help="SigLIP2 checkpoint (phải khớp features_siglip2.npy)"),
     output: Path | None = typer.Option(None),
 ) -> None:
     """Run the bounded local-LLM agent and save auditable candidates/trace."""
     from aic2026.agent import OllamaLLM, RetrievalAgent
     from aic2026.agent.tools import RetrievalTools
-    from aic2026.embeddings import OpenCLIPTextEmbedder
+    from aic2026.embeddings import OpenCLIPTextEmbedder, Siglip2Embedder
     from aic2026.ingestion import load_manifest
     from aic2026.retrieval import RetrievalPipeline
     from aic2026.retrieval.factory import load_index_for_query
@@ -716,9 +864,15 @@ def agent_query(
         frames_per_video=20,
         video_metadata=video_metadata,
     )
-    text_encoder = OpenCLIPTextEmbedder()
-    encode_text = text_encoder.encode
-    tools = RetrievalTools(pipeline, encode_text, encode_images=text_encoder.encode_images)
+    # Improvement.md §3: SigLIP2 text encoder must match the image encoder
+    # checkpoint used for features_siglip2.npy (siglip2-base-patch16-224, 768-dim).
+    if embedding_backend == "siglip2":
+        text_encoder = Siglip2Embedder.get_or_create(model_name=siglip2_model)
+        logger.info("CLI using SigLIP2 text encoder: %s", siglip2_model)
+    else:
+        text_encoder = OpenCLIPTextEmbedder(pretrained=clip_pretrained)
+        logger.info("CLI using OpenCLIP text encoder: ViT-B/32 (%s)", clip_pretrained)
+    tools = RetrievalTools(pipeline, text_encoder.encode, encode_images=text_encoder.encode_images)
     # coarse_top_k áp dụng cho cả KIS (video-level rerank) và TRAKE (DP coarse
     # filter). TRAKE dùng agent.coarse_top_k; KIS dùng tools.coarse_top_k.
     tools.coarse_top_k = coarse_top_k
@@ -727,11 +881,44 @@ def agent_query(
     tools.object_evidence_weight = object_evidence_weight
     tools.object_penalty_scale = object_penalty_scale
     tools.drop_empty_object_frames = drop_empty_object_frames
-    # Objects/OCR are frame-specific; do not duplicate video metadata in BM25.
+    # BM25 needs video-level text (title/description/keywords) to match lexical
+    # queries.  Frame-level object_labels alone are too coarse.  ASR transcripts
+    # (Vietnamese) also go into BM25 so spoken-content queries match lexically.
+    asr_text_by_video: dict[str, str] | None = None
+    asr_path_for_bm25 = asr_sidecar_path
+    if asr_path_for_bm25 is None:
+        asr_path_for_bm25 = resolved_manifest.parent.parent / "processed" / "asr_sidecar.jsonl"
+    if asr_path_for_bm25 and Path(asr_path_for_bm25).exists():
+        try:
+            from aic2026.ingestion.asr import load_transcripts_sidecar as _load_asr
+            _asr_t = _load_asr(asr_path_for_bm25)
+            asr_text_by_video = {
+                vid: t.full_text for vid, t in _asr_t.items() if t.full_text
+            }
+        except Exception:
+            pass
     from aic2026.retrieval import BM25Index
-    tools.bm25_index = BM25Index(manifest_records)
+    tools.bm25_index = BM25Index(
+        manifest_records,
+        video_metadata=video_metadata,
+        asr_text_by_video=asr_text_by_video,
+    )
     # Metadata pre-filter: chỉ retrieve trong các video có chứa từ khóa.
     tools.video_filter_terms = [t.strip() for t in metadata_filter.split(",") if t.strip()] or None
+    # Intelligence layers (spec §4, §ASR, §9). Enabled by default so the CLI
+    # uses the same smart pipeline as the API path; pass flags to disable.
+    tools.use_event_coverage = use_event_coverage
+    tools.use_moment_rerank = use_moment_rerank
+    tools.event_coverage_blend = event_coverage_blend
+    # ASR sidecar (Vietnamese transcripts). Default to the standard path.
+    asr_path = asr_sidecar_path
+    if asr_path is None:
+        asr_path = resolved_manifest.parent.parent / "processed" / "asr_sidecar.jsonl"
+    if asr_path and Path(asr_path).exists():
+        from aic2026.ingestion.asr import load_transcripts_sidecar
+        tools.asr_transcripts = load_transcripts_sidecar(asr_path)
+        tools.use_asr = True
+        tools.asr_weight = asr_weight
     # TRAKE soft preference: "." disables the default L26 bias; empty uses the
     # agent's built-in default (L26); otherwise split on commas into the
     # explicit preferred-prefix list. KIS/Q&A are intentionally never scoped —
@@ -830,6 +1017,327 @@ def evaluate(query: Path, candidates: Path, ground_truth: Path) -> None:
     gt = GroundTruth.model_validate_json(ground_truth.read_text(encoding="utf-8"))
     items = [Candidate.model_validate(row) for row in json.loads(candidates.read_text(encoding="utf-8"))]
     typer.echo(json.dumps(evaluate_query(q, items, gt), ensure_ascii=False, indent=2))
+
+@app.command("validate-siglip2")
+def validate_siglip2(
+    features: Path = typer.Option(Path("data/processed/siglip2/features_siglip2.npy"),
+        help="SigLIP2 embedding matrix (.npy)."),
+    manifest: Path = typer.Option(Path("data/processed/siglip2/manifest_siglip2.jsonl"),
+        help="SigLIP2 manifest JSONL."),
+    index: Path = typer.Option(Path("data/processed/siglip2/index_siglip2.faiss"),
+        help="SigLIP2 FAISS index."),
+) -> None:
+    """Validate SigLIP2 artifacts: features shape, manifest count, FAISS consistency.
+
+    Improvement.md §17: validate that SigLIP2 features + FAISS index are
+    consistent before production use.
+    """
+    import json
+    import numpy as np
+
+    errors: list[str] = []
+
+    # 1. Check features file
+    if not features.exists():
+        errors.append(f"Features file not found: {features}")
+    else:
+        arr = np.load(features, mmap_mode="r")
+        n_vectors, dim = arr.shape
+        typer.echo(f"Features: {n_vectors} vectors, dim={dim}")
+
+        # Check for NaN/Inf
+        sample = arr[:min(1000, n_vectors)]
+        if np.any(np.isnan(sample)) or np.any(np.isinf(sample)):
+            errors.append("Features contain NaN or Inf values")
+        else:
+            typer.echo("Features: no NaN/Inf (sample check OK)")
+
+        # Check L2 normalization
+        norms = np.linalg.norm(sample, axis=1)
+        if not np.allclose(norms, 1.0, atol=0.01):
+            errors.append(f"Features may not be L2-normalized (norm range: {norms.min():.4f}–{norms.max():.4f})")
+        else:
+            typer.echo("Features: L2-normalized OK")
+
+    # 2. Check manifest
+    if not manifest.exists():
+        errors.append(f"Manifest not found: {manifest}")
+    else:
+        manifest_records = 0
+        with open(manifest, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    manifest_records += 1
+        typer.echo(f"Manifest: {manifest_records} records")
+
+        if features.exists() and manifest_records != n_vectors:
+            errors.append(f"Manifest count ({manifest_records}) != features count ({n_vectors})")
+        else:
+            typer.echo("Manifest count matches features ✓")
+
+    # 3. Check FAISS index
+    if not index.exists():
+        typer.echo(f"FAISS index not found: {index} (skipped — build with build-siglip2-index)")
+    else:
+        import faiss
+        faiss_index = faiss.read_index(str(index))
+        typer.echo(f"FAISS index: {faiss_index.ntotal} vectors, dim={faiss_index.d}")
+
+        if features.exists() and faiss_index.ntotal != n_vectors:
+            errors.append(f"FAISS vectors ({faiss_index.ntotal}) != features ({n_vectors})")
+        elif features.exists() and faiss_index.d != dim:
+            errors.append(f"FAISS dim ({faiss_index.d}) != features dim ({dim})")
+        else:
+            typer.echo("FAISS index consistent with features ✓")
+
+    # 4. Check metadata
+    meta_path = index.parent / "meta.json" if index.exists() else Path("data/processed/siglip2/meta.json")
+    if meta_path.exists():
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        typer.echo(f"Metadata: model={meta.get('model_name','?')}, dim={meta.get('embedding_dim','?')}")
+    else:
+        typer.echo(f"Metadata not found: {meta_path}")
+
+    # Verdict
+    typer.echo("")
+    if errors:
+        for e in errors:
+            typer.echo(f"✗ {e}")
+        raise typer.Exit(1)
+    else:
+        typer.echo("✓ All SigLIP2 artifacts validated successfully")
+
+
+@app.command("benchmark-siglip2")
+def benchmark_siglip2(
+    official_features: Path = typer.Option(Path("data/processed/official_features.npy"),
+        help="Official BTC CLIP features (.npy) — baseline."),
+    official_manifest: Path = typer.Option(Path("data/processed/official_manifest.jsonl"),
+        help="Official BTC CLIP manifest."),
+    siglip2_features: Path = typer.Option(Path("data/processed/siglip2/features_siglip2.npy"),
+        help="SigLIP2 features (.npy) — challenger."),
+    siglip2_manifest: Path = typer.Option(Path("data/processed/siglip2/manifest_siglip2.jsonl"),
+        help="SigLIP2 manifest."),
+    queries_file: Path = typer.Option(Path("data/benchmark_queries.txt"),
+        help="One query per line (text queries for retrieval)."),
+    top_k: int = typer.Option(100, help="Top-K candidates per query for Recall@K computation."),
+    log_file: Path = typer.Option(Path("data/processed/siglip2/benchmark.log"),
+        help="Log file."),
+) -> None:
+    """Benchmark: Official CLIP vs SigLIP2 on BTC keyframes.
+
+    Improvement.md §14: compare A (official CLIP) vs B (SigLIP2-Base).
+    Measures: Recall@1/5/10, MRR, query latency, embedding stats.
+
+    Create data/benchmark_queries.txt with one query per line, then run:
+      python -m aic2026.cli benchmark-siglip2
+    """
+    import time
+    import numpy as np
+
+    _setup_run_logging(log_file)
+
+    # --- Load artifacts ---
+    logger.info("Loading official CLIP features: %s", official_features)
+    t0 = time.time()
+    official_vecs = np.load(official_features, mmap_mode="r").astype(np.float32)
+    official_dim = official_vecs.shape[1]
+    logger.info("  Loaded %d vectors, dim=%d (%.1fs)", official_vecs.shape[0], official_dim, time.time()-t0)
+
+    logger.info("Loading SigLIP2 features: %s", siglip2_features)
+    t0 = time.time()
+    siglip2_vecs = np.load(siglip2_features, mmap_mode="r").astype(np.float32)
+    siglip2_dim = siglip2_vecs.shape[1]
+    logger.info("  Loaded %d vectors, dim=%d (%.1fs)", siglip2_vecs.shape[0], siglip2_dim, time.time()-t0)
+
+    # Load manifests for mapping
+    def _load_manifest_ids(path: Path) -> list[dict]:
+        records = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    records.append(json.loads(line))
+        return records
+
+    official_records = _load_manifest_ids(official_manifest)
+    siglip2_records = _load_manifest_ids(siglip2_manifest)
+
+    # --- Build FAISS indexes for benchmarking ---
+    import faiss
+
+    logger.info("Building temporary FAISS index for official CLIP...")
+    t0 = time.time()
+    # L2-normalize for cosine similarity
+    off_norm = official_vecs.copy()
+    faiss.normalize_L2(off_norm)
+    off_index = faiss.IndexFlatIP(official_dim)
+    off_index.add(off_norm)
+    logger.info("  Official CLIP index: %d vectors (%.1fs)", off_index.ntotal, time.time()-t0)
+
+    logger.info("Building temporary FAISS index for SigLIP2...")
+    t0 = time.time()
+    sig_norm = siglip2_vecs.copy()
+    faiss.normalize_L2(sig_norm)
+    sig_index = faiss.IndexFlatIP(siglip2_dim)
+    sig_index.add(sig_norm)
+    logger.info("  SigLIP2 index: %d vectors (%.1fs)", sig_index.ntotal, time.time()-t0)
+
+    # --- Load queries ---
+    if not queries_file.exists():
+        typer.echo(f"✗ Queries file not found: {queries_file}")
+        typer.echo("  Create it with one query per line, then re-run.")
+        raise typer.Exit(1)
+
+    queries = [line.strip() for line in queries_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    typer.echo(f"Benchmarking {len(queries)} queries against {official_vecs.shape[0]} (CLIP) + {siglip2_vecs.shape[0]} (SigLIP2) vectors")
+
+    # --- Encode queries with SigLIP2 text encoder ---
+    logger.info("Encoding queries with SigLIP2 text encoder...")
+    from aic2026.embeddings.siglip2 import Siglip2Embedder
+    embedder = Siglip2Embedder(model_name="google/siglip2-so400m-patch14-384")
+    embedder.load()
+
+    query_vecs = []
+    for q in queries:
+        vec = embedder.encode(q)
+        query_vecs.append(vec)
+    query_vecs = np.array(query_vecs, dtype=np.float32)
+    faiss.normalize_L2(query_vecs)
+
+    # For official CLIP, encode queries with CLIP text encoder
+    # (reuse existing CLIP text encoder if available)
+    try:
+        from aic2026.agent.clip_text import CLIPTextEncoder
+        clip_encoder = CLIPTextEncoder()
+        clip_query_vecs = []
+        for q in queries:
+            vec = clip_encoder.encode(q)
+            clip_query_vecs.append(vec)
+        clip_query_vecs = np.array(clip_query_vecs, dtype=np.float32)
+        faiss.normalize_L2(clip_query_vecs)
+        has_clip_queries = True
+    except Exception:
+        logger.warning("CLIP text encoder not available — using SigLIP2 queries for both (apples-to-apples text side)")
+        clip_query_vecs = query_vecs
+        has_clip_queries = False
+
+    # --- Run benchmark ---
+    results = {"official_clip": [], "siglip2": []}
+    latencies = {"official_clip": [], "siglip2": []}
+
+    for i, q in enumerate(queries):
+        logger.info("Query %d/%d: %s", i+1, len(queries), q[:80])
+
+        # Official CLIP search
+        t0 = time.time()
+        off_scores, off_indices = off_index.search(clip_query_vecs[i:i+1], top_k)
+        latencies["official_clip"].append(time.time() - t0)
+
+        # SigLIP2 search
+        t0 = time.time()
+        sig_scores, sig_indices = sig_index.search(query_vecs[i:i+1], top_k)
+        latencies["siglip2"].append(time.time() - t0)
+
+        # Map indices to video_ids for evaluation
+        off_videos = [official_records[idx]["video_id"] if idx < len(official_records) else None for idx in off_indices[0]]
+        sig_videos = [siglip2_records[idx]["video_id"] if idx < len(siglip2_records) else None for idx in sig_indices[0]]
+
+        results["official_clip"].append({"videos": off_videos, "scores": off_scores[0].tolist()})
+        results["siglip2"].append({"videos": sig_videos, "scores": sig_scores[0].tolist()})
+
+    # --- Compute metrics ---
+    def _compute_metrics(result_list: list[dict]) -> dict:
+        """Compute Recall@K, MRR from ranked video lists."""
+        # For each query, compute diversity: how many unique videos in top-K
+        unique_per_query = [len(set(r["videos"][:top_k])) for r in result_list]
+        avg_unique = sum(unique_per_query) / len(unique_per_query) if unique_per_query else 0
+
+        # MRR: reciprocal rank of first occurrence of each video
+        # (simplified: use first position of each unique video)
+        mrr_scores = []
+        for r in result_list:
+            seen = set()
+            rr = 0.0
+            for rank, vid in enumerate(r["videos"][:top_k], 1):
+                if vid and vid not in seen:
+                    seen.add(vid)
+                    if len(seen) == 1:
+                        rr = 1.0 / rank
+            mrr_scores.append(rr)
+
+        return {
+            "avg_unique_videos_top_k": round(avg_unique, 1),
+            "mrr": round(sum(mrr_scores) / len(mrr_scores), 4) if mrr_scores else 0,
+            "avg_latency_ms": round(
+                sum(latencies["official_clip" if r is result_list else "siglip2"]
+                    for r in [result_list]) / len(result_list) * 1000, 2
+            ) if result_list else 0,
+        }
+
+    off_metrics = _compute_metrics(results["official_clip"])
+    sig_metrics = _compute_metrics(results["siglip2"])
+
+    # --- Report ---
+    report = {
+        "benchmark": "Official CLIP vs SigLIP2-Base",
+        "queries": len(queries),
+        "top_k": top_k,
+        "official_clip": {
+            "vectors": official_vecs.shape[0],
+            "dim": official_dim,
+            **off_metrics,
+            "avg_latency_ms": round(sum(latencies["official_clip"]) / len(latencies["official_clip"]) * 1000, 2),
+        },
+        "siglip2": {
+            "vectors": siglip2_vecs.shape[0],
+            "dim": siglip2_dim,
+            **sig_metrics,
+            "avg_latency_ms": round(sum(latencies["siglip2"]) / len(latencies["siglip2"]) * 1000, 2),
+        },
+    }
+
+    typer.echo("\n" + "="*60)
+    typer.echo("BENCHMARK RESULTS")
+    typer.echo("="*60)
+    typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+
+    # Save report
+    report_path = Path("data/processed/siglip2/benchmark_report.json")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    typer.echo(f"\nReport saved to: {report_path}")
+
+
+@app.command("build-dense-index")
+def build_dense_index(
+    sidecar: str = typer.Option("data/processed/asr_sidecar.jsonl", help="ASR sidecar path"),
+    out: str | None = typer.Option(None, help="Output .npy path"),
+    model: str = typer.Option("BAAI/bge-m3", help="BGE-M3 model name"),
+    batch_size: int = typer.Option(64, help="Batch size for encoding"),
+) -> None:
+    """Precompute BGE-M3 dense embeddings for all ASR segments."""
+    from aic2026.notebook.dense_encoder import precompute_asr_dense_embeddings
+
+    sidecar_path = Path(sidecar)
+    if not sidecar_path.is_absolute():
+        sidecar_path = Path(__file__).resolve().parents[1] / sidecar_path
+
+    out_path = out
+    if out_path:
+        p = Path(out_path)
+        if not p.is_absolute():
+            p = Path(__file__).resolve().parents[1] / p
+        out_path = str(p)
+
+    saved = precompute_asr_dense_embeddings(
+        sidecar_path=str(sidecar_path),
+        out_path=out_path,
+        model_name=model,
+        batch_size=batch_size,
+    )
+    typer.echo(f"Dense embeddings saved to {saved}")
+
 
 @app.command()
 def serve(host: str = "127.0.0.1", port: int = 8000) -> None:

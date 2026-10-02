@@ -16,27 +16,12 @@ from collections.abc import Callable
 
 import numpy as np
 
+from aic2026.data_platform.keyframe_resolver import resolve_keyframe_path
 from aic2026.models import Candidate, FrameRecord
 
 _COLOURS = frozenset(
     {"red", "orange", "yellow", "green", "blue", "purple", "pink", "brown", "black", "white", "gray", "grey"}
 )
-_PERSON_WORDS = frozenset({"person", "people", "human", "man", "woman", "boy", "girl", "child"})
-_GARMENT_WORDS = frozenset({"shirt", "t-shirt", "tee", "jacket", "coat", "dress", "uniform", "top", "pants", "trousers"})
-_OBJECT_LABELS = {
-    "person": _PERSON_WORDS | {"human face"},
-    "car": frozenset({"car", "vehicle", "land vehicle", "automobile"}),
-    "ball": frozenset({"ball", "football", "soccer ball"}),
-    "dog": frozenset({"dog", "puppy"}),
-    "cat": frozenset({"cat", "kitten"}),
-    "bird": frozenset({"bird"}),
-    "horse": frozenset({"horse"}),
-    "bicycle": frozenset({"bicycle", "bike"}),
-    "motorcycle": frozenset({"motorcycle", "motorbike"}),
-    "boat": frozenset({"boat", "ship"}),
-    "train": frozenset({"train"}),
-    "bus": frozenset({"bus"}),
-}
 
 
 def query_colours(query: str) -> set[str]:
@@ -111,44 +96,6 @@ def colour_fraction(rgb: np.ndarray, colour: str) -> float:
     else:
         return 0.0
     return float(mask.mean())
-
-
-def _needs_person_garment_binding(query: str) -> bool:
-    words = {word.strip(".,;:!?()[]{}\"'").lower() for word in query.split()}
-    return bool(words & _PERSON_WORDS) and bool(words & _GARMENT_WORDS)
-
-
-def _query_object_labels(query: str) -> set[str]:
-    words = {word.strip(".,;:!?()[]{}\"'").lower() for word in query.split()}
-    labels: set[str] = set()
-    for aliases in _OBJECT_LABELS.values():
-        if words & aliases:
-            labels.update(aliases)
-    return labels
-
-
-def _object_boxes(
-    object_path: str | None, labels: set[str]
-) -> list[tuple[float, float, float, float]]:
-    """Read high-confidence OpenImages boxes belonging to the requested object."""
-    if not object_path:
-        return []
-    try:
-        import json
-        payload = json.loads(Path(object_path).read_text(encoding="utf-8"))
-        names = payload.get("detection_class_entities", [])
-        scores = payload.get("detection_scores", [])
-        boxes = payload.get("detection_boxes", [])
-    except (OSError, ValueError, TypeError):
-        return []
-    selected: list[tuple[float, float, float, float]] = []
-    for name, score, box in zip(names, scores, boxes):
-        if str(name).casefold() not in labels or float(score) < 0.20 or len(box) != 4:
-            continue
-        top, left, bottom, right = (float(value) for value in box)
-        if bottom > top and right > left:
-            selected.append((top, left, bottom, right))
-    return selected
 
 
 def _proposal_boxes(object_path: str | None, limit: int = 3) -> list[tuple[float, float, float, float]]:
@@ -259,7 +206,10 @@ def contrastive_clip_colour_rerank(
         if not boxes:
             boxes = [(0.0, 0.0, 1.0, 1.0)]
         try:
-            with Image.open(Path(candidate.keyframe_path)) as image:
+            frame_path = resolve_keyframe_path(candidate.keyframe_path)
+            if frame_path is None:
+                continue
+            with Image.open(frame_path) as image:
                 image.thumbnail((384, 384))
                 rgb = image.convert("RGB")
                 width, height = rgb.size
@@ -295,164 +245,3 @@ def contrastive_clip_colour_rerank(
         adjustment = weight * float(np.clip(margin / 0.08, -1.0, 1.0))
         output.append(candidate.model_copy(update={"score": candidate.score + adjustment}))
     return sorted(output, key=lambda candidate: candidate.score, reverse=True)
-
-
-@lru_cache(maxsize=4096)
-def _image_colour_evidence(path: str, colours: tuple[str, ...]) -> float | None:
-    try:
-        from PIL import Image
-        with Image.open(Path(path)) as image:
-            image.thumbnail((192, 192))
-            rgb = np.asarray(image.convert("RGB"))
-    except (ImportError, OSError, ValueError):
-        return None
-    if rgb.size == 0:
-        return None
-    # 12% gives a full score: large enough to reject small compression noise,
-    # still tolerant of a coloured object occupying only part of a frame.
-    return max(min(colour_fraction(rgb, colour) / 0.12, 1.0) for colour in colours)
-
-
-def _bound_colour_evidence(
-    path: str, object_path: str | None, colours: tuple[str, ...],
-    labels: set[str], torso: bool,
-) -> float | None:
-    try:
-        from PIL import Image
-        with Image.open(Path(path)) as image:
-            image.thumbnail((192, 192))
-            rgb = np.asarray(image.convert("RGB"))
-    except (ImportError, OSError, ValueError):
-        return None
-    boxes = _object_boxes(object_path, labels)
-    if not boxes:
-        # Fallback về phân tích toàn bộ khung hình nếu không có bounding box nào
-        return max(min(colour_fraction(rgb, colour) / 0.12, 1.0) for colour in colours)
-    scorer = torso_colour_evidence if torso else object_colour_evidence
-    evidence = [scorer(rgb, colour, boxes) for colour in colours]
-    usable = [value for value in evidence if value is not None]
-    return max(usable) if usable else None
-
-
-_COLOUR_SIDECAR_PATH = Path("data/processed/colour_features.jsonl")
-_COLOUR_SIDECAR_CACHE: dict[int, dict] | None = None
-
-
-def set_colour_sidecar(path: str | Path | None) -> None:
-    """Point the colour reranker at a precomputed sidecar (or disable with None)."""
-    global _COLOUR_SIDECAR_PATH, _COLOUR_SIDECAR_CACHE
-    _COLOUR_SIDECAR_CACHE = None
-    if path is None:
-        _COLOUR_SIDECAR_PATH = Path("")  # falsy → disabled
-    else:
-        _COLOUR_SIDECAR_PATH = Path(path)
-
-
-def _colour_sidecar() -> dict[int, dict]:
-    """Load the offline colour sidecar once (lazily), then reuse."""
-    global _COLOUR_SIDECAR_CACHE
-    if _COLOUR_SIDECAR_CACHE is not None:
-        return _COLOUR_SIDECAR_CACHE
-    if _COLOUR_SIDECAR_PATH and _COLOUR_SIDECAR_PATH.exists():
-        from aic2026.ingestion.colour_features import load_colour_features
-
-        _COLOUR_SIDECAR_CACHE = load_colour_features(_COLOUR_SIDECAR_PATH)
-    else:
-        _COLOUR_SIDECAR_CACHE = {}
-    return _COLOUR_SIDECAR_CACHE
-
-
-def _sidecar_evidence(
-    entry: dict,
-    colours: tuple[str, ...],
-    object_labels: set[str],
-    bind_to_object: bool,
-) -> float | None:
-    """Colour evidence read from the offline sidecar (instant, no decode)."""
-    if bind_to_object:
-        # Evidence is the strongest requested-colour fraction among the matched
-        # object boxes (matched by lowercased OpenImages label).
-        matched: list[float] = []
-        for label in object_labels:
-            key = label.casefold()
-            box = entry.get("obj", {}).get(key)
-            if box and box[0] in colours:
-                matched.append(float(box[1]))
-        return max(matched) if matched else None
-    # Whole-frame: replicate the /0.12 normalisation of the live decoder.
-    fracs = entry.get("fracs")
-    if not fracs:
-        return None
-    return max(min(fracs.get(colour, 0.0) / 0.12, 1.0) for colour in colours)
-
-
-def rerank_with_colour_evidence(
-    query: str,
-    candidates: list[Candidate],
-    records: dict[int, FrameRecord] | None = None,
-    *,
-    weight: float = 0.04,
-    top_n: int = 200,
-) -> list[Candidate]:
-    """Nudge candidates by colour evidence, without VLM calls.
-
-    When a colour sidecar has been precomputed (recommended), evidence is an
-    instant dict lookup over the **entire** candidate pool — no PIL decode, no
-    CLIP image tower, no top-N window, and object colour binds to *any*
-    detected label.  Candidates missing from the sidecar fall back to the
-    original per-image decode (bounded by ``top_n``).  Missing images/Pillow
-    leave a candidate untouched.  The negative side is intentionally smaller
-    than the positive one: global colour is evidence, not proof that the
-    queried object itself has that colour.
-    """
-    colours = tuple(sorted(query_colours(query)))
-    if not colours or weight <= 0:
-        return candidates
-    bind_to_torso = _needs_person_garment_binding(query)
-    object_labels = _query_object_labels(query)
-    bind_to_object = bool(object_labels)
-    sidecar = _colour_sidecar() if _COLOUR_SIDECAR_PATH else {}
-    use_sidecar = bool(sidecar)
-
-    reranked: list[Candidate] = []
-    for rank, candidate in enumerate(candidates):
-        if candidate.vector_id is not None and use_sidecar:
-            entry = sidecar.get(candidate.vector_id)
-            if entry is not None:
-                evidence = _sidecar_evidence(entry, colours, object_labels, bind_to_object)
-                if evidence is None:
-                    reranked.append(candidate)
-                    continue
-                adjustment = (
-                    weight * evidence
-                    if evidence >= 0.10
-                    else -weight * (1.0 if bind_to_object else 0.35)
-                )
-                reranked.append(candidate.model_copy(update={"score": candidate.score + adjustment}))
-                continue
-        # Fallback: live decode of the leading candidates by keyframe image.
-        if rank >= top_n or not candidate.keyframe_path:
-            reranked.append(candidate)
-            continue
-        record = records.get(candidate.vector_id) if records and candidate.vector_id is not None else None
-        evidence = _bound_colour_evidence(
-            candidate.keyframe_path,
-            record.object_path if record else None,
-            colours,
-            object_labels,
-            bind_to_torso,
-        ) if bind_to_object else _image_colour_evidence(candidate.keyframe_path, colours)
-        if evidence is None:
-            reranked.append(candidate)
-            continue
-        # For a bound request such as "man wearing a red shirt", a detected
-        # torso with no red is strong negative evidence.  For a whole-frame
-        # colour request it remains a softer penalty because the target can be
-        # small or outside the central subject.
-        adjustment = (
-            weight * evidence
-            if evidence >= 0.10
-            else -weight * (1.0 if bind_to_object else 0.35)
-        )
-        reranked.append(candidate.model_copy(update={"score": candidate.score + adjustment}))
-    return sorted(reranked, key=lambda candidate: candidate.score, reverse=True)

@@ -33,7 +33,9 @@ _VI_RE = re.compile(
 )
 
 # Placeholder thay thế tạm thời cho đoạn trong ngoặc, yêu cầu LLM giữ nguyên.
-_KEEP_RE = re.compile(r"<<<KEEP_(\d+)>>>")
+# IGNORECASE: bản thân placeholder có thể bị lower() (do bước chuẩn hóa tiếng
+# Việt), nên regex phải match cả <<<keep_0>>> lẫn <<<KEEP_0>>>.
+_KEEP_RE = re.compile(r"<<<KEEP_(\d+)>>>", re.IGNORECASE)
 
 
 class Translation(BaseModel):
@@ -147,6 +149,12 @@ _VN_EN_TOKENS: dict[str, str] = {
     "ngu": "sleep", "doc": "read", "viet": "write", "xem": "watch",
     "nghe": "listen", "chup": "take", "quay": "film", "dua": "hug",
     "vet": "wave", "chi": "point", "dem": "carry",
+    # sequential-action vocabulary — critical for TRAKE queries, where an
+    # untranslated verb can make one event vector unrelated to every frame.
+    "mo": "open", "dong": "close", "vao": "enter", "ra": "exit",
+    "do vao": "pour", "rot": "pour", "khuay": "stir", "lac": "shake",
+    "nhat": "pick up", "dat": "put down", "dua len": "raise",
+    "lay": "take", "nem": "throw", "rua": "wash", "cat": "cut",
     # địa điểm / cảnh
     "nha": "house", "cong": "factory", "truong": "school",
     "benh": "hospital", "cho": "market", "cua hang": "shop",
@@ -174,6 +182,39 @@ _VN_EN_TOKENS: dict[str, str] = {
     "khi leu": "clown", "nhac cong": "orchestra", "ca si": "singer",
     "khan gia": "audience", "dao dien": "director", "dien vien": "actor",
     "hoa mi": "flower", "cay": "tree", "bong hoa": "flower",
+    # Whisper ASR common spelling corrections (diacritics-removed forms)
+    "oong": "ong",      # "ông" misheard
+    "aang": "ang",      # "ã" misheard
+    "eeng": "eng",      # "ề" misheard
+    "oang": "oang",
+    "uong": "uong",
+    "ueng": "ueng",
+    "gi": "di",         # "gi" → "di" (northern dialect)
+    "gh": "g",          # "gh" → "g"
+    "kh": "k",          # "kh" → "k"
+    "ngh": "ng",        # "ngh" → "ng"
+    "nh": "n",          # "nh" → "n"
+    "ph": "f",          # "ph" → "f"
+    "th": "t",          # "th" → "t"
+    "tr": "tr",         # "tr" → "tr"
+    "ch": "c",          # "ch" → "c"
+    "con cho": "con cho",
+    "con meo": "con meo",
+    "nguoi": "nguoi",
+    "nguoi dan": "nguoi dan",
+    "xa hoi": "xa hoi",
+    "phat trien": "phat trien",
+    "cong nghe": "cong nghe",
+    "khoa hoc": "khoa hoc",
+    "giao duc": "giao duc",
+    "y te": "y te",
+    "van hoa": "van hoa",
+    "lich su": "lich su",
+    "dia ly": "dia ly",
+    "toan hoc": "toan hoc",
+    "vat ly": "vat ly",
+    "hoa hoc": "hoa hoc",
+    "sinh hoc": "sinh hoc",
 }
 
 # Cụm truy vấn thường gặp phải được dịch theo cả nghĩa, không ghép từng từ.
@@ -237,15 +278,22 @@ def offline_translate(text: str) -> str:
     stripped = _strip_diacritics(remainder)
     lowered = stripped.lower()
 
-    # 1) Thay cụm nhiều từ trước (chuỗi dài hơn ưu tiên).
-    phrase_replaced = False
+    # 1) Thay cụm nhiều từ trước (chuỗi dài hơn ưu tiên). Cụm được thay bằng
+    #    placeholder BẢO VỆ (<<<P_N>>>) rồi khôi phục SAU bước dịch từng token,
+    #    để các từ tiếng Anh do cụm chèn vào (vd "an" trong "an image of") KHÔNG
+    #    bị từ điển tiếng Việt dịch nhầm (ví dụ "an" -> "eat" do "ăn" bỏ dấu
+    #    thành "an"). _PHRASE_TABLE đã sắp xếp chuỗi dài trước, nên cụm dài thắng.
+    protected_phrases: list[str] = []
     for phrase, en in _PHRASE_TABLE:
         if phrase in lowered:
-            phrase_replaced = True
-            lowered = lowered.replace(phrase, " " + en + " ")
+            placeholder = f"<<<P_{len(protected_phrases)}>>>"
+            lowered = lowered.replace(phrase, " " + placeholder + " ")
+            protected_phrases.append(en)  # lưu bản TIẾNG ANH để khôi phục sau
+    phrase_replaced = bool(protected_phrases)
 
     # 2) Thay từng token (lookup theo dạng đã bỏ dấu). Token không có trong
-    #    từ điển tiếng Việt được giữ nguyên (tiếng Anh).
+    #    từ điển tiếng Việt được giữ nguyên (tiếng Anh). Placeholder <<<P_N>>>
+    #    là 1 token nguyên khối, không khớp từ điển, nên được giữ nguyên.
     out = []
     seen_vietnamese = False
     for tok in lowered.split():
@@ -256,6 +304,10 @@ def offline_translate(text: str) -> str:
         out.append(en if en is not None else tok)
     translated = " ".join(out).strip()
 
+    # Khôi phục các cụm tiếng Anh đã bảo vệ (placeholder -> English gốc).
+    for i, en in enumerate(protected_phrases):
+        translated = translated.replace(f"<<<P_{i}>>>", en)
+
     # Nếu không có token tiếng Việt nào được dịch thì input vốn đã là tiếng Anh
     # (hoặc UNKNOWN-token thuần) — trả về nguyên văn, giữ nguyên hoa/thường và dấu
     # câu (quan trọng cho TRAKE events: "The person..." phải được giữ y hệt).
@@ -263,6 +315,88 @@ def offline_translate(text: str) -> str:
         return _restore(remainder, protected).strip()
 
     return _restore(translated, protected).strip()
+
+
+# ---------------------------------------------------------------------------
+# OFFLINE English -> Vietnamese translator (mirror của offline_translate VI->EN).
+#
+# Dùng cho NHÁNH BM25 tiếng Việt: index BM25 chứa ASR/OCR/metadata TIẾNG VIỆT
+# (vd transcript "Botswana phát hiện viên kim cương thô..."), nên query tiếng Anh
+# chạy thẳng vào BM25 sẽ KHÔNG khớp ("gemstone" != "kim cương"). Hàm này dịch các
+# từ KHÓA domain (khai khoáng, thiên tai, con người, hành động, vật thể...) sang
+# tiếng Việt để BM25 bắt được transcript, còn từ không có trong từ điển (vd "a",
+# "the", "his") được GIỮ NGUYÊN — vô hại vì không khớp index nhưng cũng không
+# làm nhiễu. Chạy trên CPU, O(số từ), không cần LLM.
+#
+# CHỈ dịch những từ CÓ khả năng xuất hiện trong transcript/metadata tiếng Việt;
+# không dịch đại mọi từ (tránh sinh rác). Từ không có trong dict => giữ nguyên EN.
+# ---------------------------------------------------------------------------
+_EN_VN_TOKENS: dict[str, str] = {
+    # khai khoáng / đá quý (domain hay bị lỗi nhất)
+    "gemstone": "đá quý", "gem": "đá quý", "diamond": "kim cương",
+    "rough": "thô", "raw": "thô", "mine": "mỏ", "mining": "khai thác mỏ",
+    "quarry": "mỏ đá", "open-pit": "lộ thiên", "pit": "hố", "ore": "quặng",
+    "excavation": "đào", "excavator": "máy xúc", "jewel": "trang sức",
+    "precious": "quý", "stone": "đá", "rock": "đá", "mineral": "khoáng sản",
+    # thiên tai / cảnh ngoài trời
+    "flood": "lũ", "lũ": "lũ", "landslide": "sạt lở", "avalanche": "lở núi",
+    "fire": "cháy", "earthquake": "động đất", "storm": "bão",
+    "typhoon": "bão", "cyclone": "bão", "drought": "hạn hán",
+    "erosion": "xói mòn", "disaster": "thảm họa", "tsunami": "sóng thần",
+    "volcano": "núi lửa", "whirlpool": "xoáy nước", "sinkhole": "sụt lún",
+    # con người
+    "man": "nam", "men": "nam", "woman": "nữ", "women": "nữ",
+    "child": "trẻ em", "children": "trẻ em", "person": "người",
+    "people": "người dân", "soldier": "lính", "police": "cảnh sát",
+    "student": "học sinh", "worker": "công nhân", "farmer": "nông dân",
+    "doctor": "bác sĩ", "rescuer": "người cứu hộ", "crowd": "đám đông",
+    # hành động
+    "hold": "cầm", "holding": "cầm", "carry": "mang", "carrying": "mang",
+    "sit": "ngồi", "sitting": "ngồi", "stand": "đứng", "standing": "đứng",
+    "run": "chạy", "running": "chạy", "walk": "đi", "dig": "đào",
+    "digging": "đào", "explode": "nổ", "explosion": "vụ nổ",
+    "rescue": "cứu hộ", "smile": "mỉm cười", "lift": "nâng", "examine": "xem xét",
+    # địa điểm / cảnh
+    "river": "sông", "mountain": "núi", "beach": "bãi biển", "sea": "biển",
+    "road": "đường", "street": "đường phố", "factory": "nhà máy",
+    "field": "cánh đồng", "forest": "rừng", "village": "làng", "city": "thành phố",
+    "aerial": "trên không", "panoramic": "toàn cảnh", "view": "cảnh",
+    # vật thể / trang phục
+    "suit": "vest", "tie": "cà vạt", "shirt": "áo sơ mi", "helmet": "mũ bảo hộ",
+    "truck": "xe tải", "vehicle": "xe", "car": "ô tô", "boat": "thuyền",
+    "chair": "ghế", "table": "bàn", "scarf": "khăn choàng đầu", "headscarf": "khăn choàng đầu",
+    # màu sắc (giữ đồng bộ với VI->EN)
+    "blue": "xanh", "green": "xanh", "red": "đỏ", "yellow": "vàng",
+    "white": "trắng", "black": "đen", "purple": "tím", "pink": "hồng",
+    "brown": "nâu", "gray": "xám", "grey": "xám",
+}
+
+
+def offline_translate_en_to_vi(text: str) -> str:
+    """Dịch Anh -> Việt (từ điển domain) cho nhánh BM25 tiếng Việt.
+
+    Chỉ thay các từ KHÓA có trong ``_EN_VN_TOKENS``; từ còn lại giữ nguyên EN.
+    Trả về chuỗi đã dịch. Nếu KHÔNG có token nào được dịch (query thuần EN không
+    thuộc domain, hoặc vốn đã là tiếng Việt) thì trả về bản gốc để caller biết
+    không cần chạy nhánh BM25-VI riêng.
+    """
+    if not text:
+        return text
+    out = []
+    changed = False
+    for tok in text.split():
+        # tách punctuation đơn giản để "mine." -> "mine" match dict, nhưng giữ lại
+        core = tok.strip(".,;:!?\"'()[]{}")
+        if not core:
+            out.append(tok)
+            continue
+        vi = _EN_VN_TOKENS.get(core.lower())
+        if vi is not None:
+            out.append(vi)
+            changed = True
+        else:
+            out.append(tok)
+    return " ".join(out).strip() if changed else text
 
 
 def _is_literal_text_query(text: str) -> bool:

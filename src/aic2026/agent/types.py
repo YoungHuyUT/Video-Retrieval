@@ -14,6 +14,11 @@ class AgentPlan(BaseModel):
     query_variants: list[str] = Field(min_length=1, max_length=6)
     events: list[str] = Field(default_factory=list, max_length=8)
     rationale: str = Field(max_length=500)
+    # Optional structured query understanding (QueryPlan). Built by the LLM
+    # planner (or rule-based fallback) inside ``RetrievalAgent.run``; carried on
+    # the plan so downstream rerank stages can read entities/constraints/modality
+    # weights without re-planning. ``None`` when query planning is disabled.
+    query_plan: dict | None = None
 
 
 class AgentDecision(BaseModel):

@@ -1,0 +1,103 @@
+# ===========================================================================
+# docker-compose.yml - chay API + UI cung luc bang 1 lenh.
+#
+# GIANG:
+# - Service: tung container rieng biet (api, ui, ollama).
+# - Compose tu tao 1 MANG NOI BO (bridge). Trong mang nay,
+#   'api' la ten host -> ui co the goi http://api:8000 neu can.
+# - Browser ban tren HOST van goi http://127.0.0.1:8000 (qua port map),
+#   nen CORS localhost:8501/8000 trong api.py van dung.
+# - Volume: data/ + outputs/ + HF cache mount tu host -> container,
+#   de model/index khong bi mat khi rebuild image.
+# - Profile 'llm': ollama KHONG chay mac dinh (ban noi khong dung LLM).
+# ===========================================================================
+
+services:
+  # ------------------------------------------------------------------
+  # api - FastAPI backend, preload heavy assets khi start (~20s+).
+  # ------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aic2026:dev
+    container_name: aic2026-api
+    command: ["uvicorn", "aic2026.app.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"   # host:container -> browser goi localhost:8000
+    volumes:
+      # Bind mount: noi dung host truc tiep xuong container (2 chieu).
+      # data/ chua manifest + FAISS + keyframes; container doc duong dan
+      # tuong doi data/processed/... tu WORKDIR /app.
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+      # Named volume: HF model cache (SigLIP2 weights) giua cac lan build.
+      - hf-cache:/home/app/.cache/huggingface
+    environment:
+      - HF_HOME=/home/app/.cache/huggingface
+      - TRANSFORMERS_CACHE=/home/app/.cache/huggingface
+      - PYTHONPATH=/app/src
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # ui - Streamlit PEGASUS (dashboard.html goi backend qua backendUrl).
+  # Browser tren host: dashboard default backendUrl = http://127.0.0.1:8000
+  # -> khong can doi CORS; chi can port map dung la du.
+  # ------------------------------------------------------------------
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aic2026:dev
+    container_name: aic2026-ui
+    command:
+      [
+        "streamlit", "run", "src/aic2026/app/ui.py",
+        "--server.port=8501",
+        "--server.address=0.0.0.0",
+        "--server.headless=true",
+        "--browser.gatherUsageStats=false",
+      ]
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+      - hf-cache:/home/app/.cache/huggingface
+    environment:
+      - HF_HOME=/home/app/.cache/huggingface
+      - PYTHONPATH=/app/src
+    depends_on:
+      api:
+        condition: service_healthy   # chi start UI khi API da healthy
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # ollama - OPTIONAL, dang sau profile 'llm'.
+  # Khong chay mac dinh: ban noi khong dung LLM trong AIC2026.
+  # Neu can: docker compose --profile llm up -d
+  # ------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: aic2026-ollama
+    profiles: ["llm"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+
+# ---------------------------------------------------------------------------
+# Volumes - noi luu persistent rieng voi container lifecycle.
+# - bind mount (./data) = duong dan host, thay doi tuc thi, giu du lieu khi down.
+# - named volume (hf-cache, ollama) = quan ly boi Docker, doc/viet nhanh hon.
+# ---------------------------------------------------------------------------
+volumes:
+  hf-cache:
+  ollama:

@@ -20,12 +20,28 @@ class OpenCLIPTextEmbedder:
         )
         self.tokenizer = open_clip.get_tokenizer(model_name)
         self.model.eval()
+        self._cache: dict[str, np.ndarray] = {}
+        self._cache_max_size: int = 2048
 
     def encode(self, text: str) -> np.ndarray:
+        cached = self._cache.get(text)
+        if cached is not None:
+            return cached.copy()
+
+        if self.model is None or self.tokenizer is None:
+            raise RuntimeError("Model is unloaded. Call load() first.")
+
         with self.torch.no_grad():
             features = self.model.encode_text(self.tokenizer([text]).to(self.device))
             features = features / features.norm(dim=-1, keepdim=True)
-        return features[0].detach().cpu().float().numpy()
+            vec = features[0].detach().cpu().float().numpy()
+
+        if len(self._cache) >= self._cache_max_size:
+            # Simple eviction: clear half when full
+            for k in list(self._cache.keys())[: self._cache_max_size // 2]:
+                del self._cache[k]
+        self._cache[text] = vec
+        return vec.copy()
 
     def encode_images(self, images: list[object], batch_size: int = 32) -> np.ndarray:
         """Encode RGB PIL images with the same CLIP checkpoint as ``encode``."""

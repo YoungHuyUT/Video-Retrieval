@@ -49,7 +49,10 @@ def build_vector_index(
 ) -> VectorIndex | ChromaVectorStore:
     """Build an index backend from a feature ``.npy`` + manifest.
 
-    ``backend="faiss"`` (the default) uses the supplied CLIP matrix directly.
+    ``backend="faiss"`` loads the matrix into RAM so ``VectorIndex`` can build
+    an actual ``IndexFlatIP``.  ``backend="numpy"`` is the explicit low-memory
+    mmap/full-scan mode.  Previously both paths used mmap, so the advertised
+    FAISS backend silently performed an O(N) NumPy scan for every query.
     """
     resolved = _resolve_backend(backend, chroma_dir, collection_name, manifest)
     if resolved == "chroma":
@@ -60,7 +63,7 @@ def build_vector_index(
             collection_name=collection_name,
             space=space,
         )
-    return VectorIndex.from_npy(features)
+    return VectorIndex.from_npy(features, mmap=(resolved == "numpy"))
 
 
 def load_index_for_query(
@@ -69,6 +72,8 @@ def load_index_for_query(
     backend: str = "faiss",
     chroma_dir: str | Path = "data/indexes/chroma",
     collection_name: str = "aic2026_frames",
+    features_normalized: bool = False,
+    ann_index_path: Path | None = None,
 ) -> VectorIndex | ChromaVectorStore:
     """Query-time loader for the supplied CLIP ``.npy`` matrix.
 
@@ -88,7 +93,7 @@ def load_index_for_query(
     # rather than as wrong results at query time.
     try:
         n_rows = int(np.load(features, mmap_mode="r").shape[0])
-    except Exception as exc:  # noqa: BLE001 — re-raised as a clear ValueError below
+    except Exception as exc:
         raise ValueError(f"Cannot read feature matrix {features}: {exc}") from exc
     if n_rows != len(manifest):
         raise ValueError(
@@ -97,4 +102,16 @@ def load_index_for_query(
             f"'.npy' or a regenerated manifest usually causes this; rebuild both "
             f"from the same source with `prepare-official`."
         )
-    return VectorIndex.from_npy(features)
+    index = VectorIndex.from_npy(
+        features,
+        mmap=(resolved == "numpy"),
+        assume_normalized=features_normalized,
+    )
+    if ann_index_path is not None and isinstance(index, VectorIndex):
+        try:
+            index.enable_ivfpq(ann_index_path)
+        except Exception:
+            logger.exception(
+                "Could not build/load compressed ANN index; falling back to exact vector scan"
+            )
+    return index

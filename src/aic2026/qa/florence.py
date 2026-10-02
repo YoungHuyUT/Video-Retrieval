@@ -6,6 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from aic2026.data_platform.keyframe_resolver import resolve_keyframe_path
 from aic2026.models import Candidate
 
 logger = logging.getLogger(__name__)
@@ -23,27 +24,8 @@ _MODEL_ID = "microsoft/Florence-2-base-ft"
 
 
 def _resolve_frame_path(keyframe_path: str | None) -> Path | None:
-    """Resolve a manifest-relative keyframe path against common project roots."""
-    if not keyframe_path:
-        return None
-    candidate = Path(keyframe_path)
-    if candidate.is_absolute() and candidate.exists():
-        return candidate
-    if candidate.exists():
-        return candidate
-    root = Path.cwd()
-    name = candidate.name
-    parent_name = candidate.parent.name
-    for probe in (
-        root / keyframe_path,
-        root / "data" / keyframe_path,
-        root / "data" / "raw" / keyframe_path,
-        root / "data" / "raw" / "Keyframes" / keyframe_path,
-        root / "data" / "raw" / "Keyframes" / parent_name / name,
-    ):
-        if probe.exists():
-            return probe
-    return None
+    """Resolve local paths and lazily materialize keyframes stored in ZIPs."""
+    return resolve_keyframe_path(keyframe_path)
 
 
 class FlorenceVLM:
@@ -94,15 +76,37 @@ class FlorenceVLM:
             )
             return
 
+        import os
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
         dtype = getattr(torch, self.torch_dtype, torch.float32)
         try:
             self._processor = AutoProcessor.from_pretrained(
-                self.model_name, trust_remote_code=True
+                self.model_name, trust_remote_code=True, local_files_only=True
             )
+            # Patch Florence2Config: newer transformers versions access
+            # forced_bos_token_id during model init, but Florence-2's custom
+            # config class doesn't declare it.  We monkey-patch the CLASS
+            # itself (not the instance) because AutoModelForCausalLM internally
+            # clones the config — instance-level patches are lost.
+            from transformers import AutoConfig
+            _cfg = AutoConfig.from_pretrained(
+                self.model_name, trust_remote_code=True, local_files_only=True,
+            )
+            _cfg_cls = type(_cfg)
+            if not hasattr(_cfg_cls, "forced_bos_token_id"):
+                _cfg_cls.forced_bos_token_id = None
+                logger.debug(
+                    "FlorenceVLM: monkey-patched %s.forced_bos_token_id", _cfg_cls.__name__
+                )
             self._model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
+                config=_cfg,
                 trust_remote_code=True,
                 torch_dtype=dtype,
+                local_files_only=True,
+                low_cpu_mem_usage=True,
             ).eval()
             if self.device:
                 self._model = self._model.to(self.device)

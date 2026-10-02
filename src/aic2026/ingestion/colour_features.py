@@ -13,10 +13,11 @@ For every keyframe with an image it stores, in a tiny JSONL sidecar:
      "fracs": {"red": 0.02, "green": 0.31, ...},
      "obj": {"person": ["red", 0.42], "car": ["blue", 0.50]}}
 
-At query time ``rerank_with_colour_evidence`` reads this sidecar by dict lookup
-— instant, covers *every* candidate (not just top-N), and works for *any*
-detected object label, not a hardcoded vocabulary.  Frames without a local image
-are simply omitted and fall back to no colour evidence.
+At query time the runtime reranker (``contrastive_clip_colour_rerank``) reads
+colour evidence directly from decoded keyframe crops via the CLIP image tower —
+no offline sidecar required.  This module still exists so the sidecar can be
+precomputed for experiments/benchmarks that want a cheaper, dict-lookup colour
+signal.  Frames without a local image are simply omitted.
 """
 
 from __future__ import annotations

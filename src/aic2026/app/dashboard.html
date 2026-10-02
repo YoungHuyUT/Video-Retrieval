@@ -1,0 +1,1632 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PEGASUS Retrieval Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+/* ============================ TOKENS ============================ */
+:root{
+  --bg:#F6F7F9;
+  --surface:#FFFFFF;
+  --surface-2:#FBFCFD;
+  --border:#E4E7EC;
+  --border-strong:#D2D7DF;
+  --ink:#14171C;
+  --ink-2:#3A3F48;
+  --muted:#6B7280;
+  --faint:#9AA1AC;
+  --red:#E5484D;
+  --red-soft:#FCEDEE;
+  --orange:#E8590C;
+  --orange-soft:#FCEFE6;
+  --yellow:#FEF3C7;
+  --yellow-ink:#92600A;
+  --green:#1F9D57;
+  --green-soft:#E7F5EC;
+  --amber:#E8590C;
+  --shadow:0 1px 2px rgba(20,23,28,.04), 0 2px 8px rgba(20,23,28,.05);
+  --shadow-pop:0 8px 30px rgba(20,23,28,.16);
+  --radius:10px;
+  --radius-sm:7px;
+  --rail:300px;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0E1014;
+    --surface:#16191F;
+    --surface-2:#1B1F26;
+    --border:#262B33;
+    --border-strong:#333A44;
+    --ink:#E7E9ED;
+    --ink-2:#C2C7CF;
+    --muted:#9AA1AC;
+    --faint:#6B7280;
+    --red:#FF6166;
+    --red-soft:#3A1E20;
+    --orange:#FF7A1A;
+    --orange-soft:#33210F;
+    --yellow:#3A2F12;
+    --yellow-ink:#F5D77A;
+    --green:#3FB968;
+    --green-soft:#142A1C;
+    --amber:#FF7A1A;
+    --shadow:0 1px 2px rgba(0,0,0,.3), 0 2px 10px rgba(0,0,0,.35);
+    --shadow-pop:0 12px 40px rgba(0,0,0,.55);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0E1014;
+  --surface:#16191F;
+  --surface-2:#1B1F26;
+  --border:#262B33;
+  --border-strong:#333A44;
+  --ink:#E7E9ED;
+  --ink-2:#C2C7CF;
+  --muted:#9AA1AC;
+  --faint:#6B7280;
+  --red:#FF6166;
+  --red-soft:#3A1E20;
+  --orange:#FF7A1A;
+  --orange-soft:#33210F;
+  --yellow:#3A2F12;
+  --yellow-ink:#F5D77A;
+  --green:#3FB968;
+  --green-soft:#142A1C;
+  --amber:#FF7A1A;
+  --shadow:0 1px 2px rgba(0,0,0,.3), 0 2px 10px rgba(0,0,0,.35);
+  --shadow-pop:0 12px 40px rgba(0,0,0,.55);
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;background:var(--bg);color:var(--ink);
+  font-family:var(--sans);font-size:13px;line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+button{font-family:inherit}
+::selection{background:var(--red-soft);color:var(--red)}
+
+/* ============================ SHELL ============================ */
+.shell{display:flex;height:100vh;overflow:hidden}
+
+/* ---- Sidebar ---- */
+.sidebar{
+  width:var(--rail);flex:0 0 var(--rail);
+  position:sticky;top:0;align-self:flex-start;height:100vh;
+  background:var(--surface);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;overflow:hidden;
+}
+.brand{
+  display:flex;align-items:center;gap:.6rem;padding:16px 18px;
+  border-bottom:1px solid var(--border);
+}
+.brand .mark{
+  width:30px;height:30px;border-radius:8px;flex:0 0 auto;
+  background:linear-gradient(135deg,var(--ink),var(--ink-2));
+  display:flex;align-items:center;justify-content:center;
+  color:var(--surface);font-family:var(--mono);font-weight:600;font-size:13px;
+  letter-spacing:.5px;
+}
+.brand .mark.horse-mark{background:linear-gradient(135deg,var(--ink),var(--ink-2));padding:5px}
+.brand .mark.horse-mark svg{width:100%;height:100%;display:block}
+.brand .name{font-weight:700;font-size:14px;letter-spacing:.02em;line-height:1.1}
+.brand .sub{font-size:10.5px;color:var(--faint);letter-spacing:.04em;text-transform:uppercase}
+
+.side-scroll{flex:1 1 auto;overflow-y:auto;padding:14px 16px 8px}
+.side-scroll::-webkit-scrollbar{width:8px}
+.side-scroll::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:8px}
+
+.section-label{
+  font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--muted);margin:6px 2px 9px;display:flex;align-items:center;gap:6px;
+}
+.section-label .dot{width:5px;height:5px;border-radius:50%;background:var(--red)}
+
+/* ---- Mode selector ---- */
+.mode-list{display:flex;flex-direction:column;gap:7px;margin-bottom:18px}
+.mode{
+  display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;
+  padding:10px 11px;border:1px solid var(--border);border-radius:var(--radius-sm);
+  background:var(--surface);cursor:pointer;transition:border-color .15s,background .15s,box-shadow .15s;
+}
+.mode:hover{border-color:var(--border-strong)}
+.mode.active{border-color:var(--red);background:var(--red-soft);box-shadow:inset 0 0 0 1px var(--red)}
+.mode .code{
+  font-family:var(--mono);font-weight:600;font-size:11px;color:var(--muted);
+  width:38px;height:30px;display:flex;align-items:center;justify-content:center;
+  border:1px solid var(--border);border-radius:6px;background:var(--surface-2);
+}
+.mode.active .code{color:var(--red);border-color:var(--red);background:var(--surface)}
+.mode .title{font-weight:600;font-size:12.5px;line-height:1.15}
+.mode .desc{font-size:10.5px;color:var(--muted);margin-top:1px}
+.mode .radio{
+  width:15px;height:15px;border-radius:50%;border:2px solid var(--border-strong);
+  display:flex;align-items:center;justify-content:center;flex:0 0 auto;
+}
+.mode.active .radio{border-color:var(--red)}
+.mode.active .radio::after{content:"";width:7px;height:7px;border-radius:50%;background:var(--red)}
+
+/* ---- Config ---- */
+.config{display:flex;flex-direction:column;gap:13px}
+.field{display:flex;flex-direction:column;gap:5px}
+.field > label{font-size:11px;font-weight:600;color:var(--ink-2)}
+.field .hint{font-size:10px;color:var(--faint);font-weight:400}
+textarea.q,input.txt{
+  width:100%;border:1px solid var(--border);border-radius:var(--radius-sm);
+  background:var(--surface-2);color:var(--ink);padding:8px 9px;font-family:var(--sans);
+  font-size:12px;resize:vertical;transition:border-color .15s,box-shadow .15s;line-height:1.45;
+}
+textarea.q::placeholder,input.txt::placeholder{color:var(--faint)}
+textarea.q:focus,input.txt:focus,select.sel:focus{
+  outline:none;border-color:var(--red);box-shadow:0 0 0 3px var(--red-soft);
+}
+select.sel{
+  width:100%;border:1px solid var(--border);border-radius:var(--radius-sm);
+  background:var(--surface-2);color:var(--ink);padding:7px 9px;font-family:var(--mono);
+  font-size:11.5px;appearance:none;cursor:pointer;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239AA1AC' stroke-width='2.5'><path d='M6 9l6 6 6-6'/></svg>");
+  background-repeat:no-repeat;background-position:right 9px center;
+}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+
+/* slider */
+input[type=range]{width:100%;accent-color:var(--red);height:4px}
+.range-head{display:flex;justify-content:space-between;align-items:baseline}
+.range-head .val{font-family:var(--mono);font-size:11px;color:var(--orange);font-weight:600}
+
+/* toggles */
+.toggle{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding:7px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-2)}
+.toggle .t-label{font-size:11.5px;font-weight:500}
+.toggle .t-sub{font-size:9.5px;color:var(--faint);margin-top:1px}
+.switch{position:relative;width:34px;height:19px;flex:0 0 auto;cursor:pointer}
+.switch input{opacity:0;width:0;height:0}
+.switch .track{position:absolute;inset:0;background:var(--border-strong);border-radius:999px;transition:.18s}
+.switch .knob{position:absolute;top:2px;left:2px;width:15px;height:15px;background:#fff;border-radius:50%;transition:.18s;box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.switch input:checked + .track{background:var(--red)}
+.switch input:checked + .track + .knob{transform:translateX(15px)}
+
+.side-foot{border-top:1px solid var(--border);padding:12px 16px;background:var(--surface-2)}
+.demo-label{font-size:10px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+.chips{display:flex;flex-wrap:wrap;gap:5px}
+.chip{
+  font-family:var(--mono);font-size:10px;padding:4px 7px;border-radius:999px;
+  border:1px solid var(--border);background:var(--surface);color:var(--muted);cursor:pointer;
+  transition:.12s;
+}
+.chip:hover{border-color:var(--border-strong);color:var(--ink)}
+.chip.on{background:var(--ink);color:var(--surface);border-color:var(--ink)}
+
+/* ============================ WORKSPACE ============================ */
+.workspace{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.workspace .main{overflow-y:auto;flex:1 1 auto;height:0}
+.topbar{
+  position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:12px;
+  padding:11px 22px;background:color-mix(in srgb,var(--bg) 82%,transparent);
+  backdrop-filter:blur(10px);border-bottom:1px solid var(--border);
+}
+.crumb{display:flex;align-items:center;gap:9px;min-width:0}
+.crumb .mode-chip{
+  font-family:var(--mono);font-size:11px;font-weight:600;color:var(--red);
+  background:var(--red-soft);border:1px solid var(--red);padding:3px 8px;border-radius:6px;
+}
+.crumb .title{font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.crumb .sep{color:var(--faint)}
+.topbar .spacer{flex:1 1 auto}
+.icon-btn{
+  width:30px;height:30px;border:1px solid var(--border);background:var(--surface);border-radius:7px;
+  cursor:pointer;color:var(--muted);display:flex;align-items:center;justify-content:center;font-size:14px;
+}
+.icon-btn:hover{border-color:var(--border-strong);color:var(--ink)}
+
+.main{padding:20px 22px 60px;width:100%}
+
+/* ---- Query panel ---- */
+.query-card{
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  box-shadow:var(--shadow);padding:15px 16px 14px;margin-bottom:20px;
+}
+.q-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.q-head .lbl{font-size:10.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.q-head .meta{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+textarea.query{
+  width:100%;min-height:64px;border:1px solid var(--border);border-radius:var(--radius-sm);
+  background:var(--surface-2);color:var(--ink);padding:10px 11px;font-family:var(--sans);
+  font-size:13px;line-height:1.5;resize:vertical;transition:border-color .15s,box-shadow .15s;
+}
+textarea.query:focus{outline:none;border-color:var(--red);box-shadow:0 0 0 3px var(--red-soft)}
+.asr-query-wrap{margin-top:10px;border:1px solid color-mix(in srgb,var(--red) 30%,transparent);
+  border-radius:var(--radius-sm);background:color-mix(in srgb,var(--red) 7%,var(--surface-2));
+  padding:9px 11px;}
+.asr-query-label{display:block;font-size:10.5px;font-weight:600;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--red);margin-bottom:6px}
+.asr-query-input{width:100%;border:1px solid var(--border);border-radius:var(--radius-sm);
+  background:var(--surface);color:var(--ink);padding:8px 10px;font-family:var(--sans);font-size:13px}
+.asr-query-input:focus{outline:none;border-color:var(--red);box-shadow:0 0 0 3px var(--red-soft)}
+.asr-query-hint{margin-top:6px;font-size:11px;color:var(--muted);line-height:1.4}
+
+/* detected events */
+.events-block{
+  margin-top:13px;border:1px dashed var(--border-strong);border-radius:var(--radius-sm);
+  background:var(--surface-2);padding:11px 12px;
+}
+.events-block .eb-head{font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);margin-bottom:9px;display:flex;align-items:center;gap:6px}
+.events-block .eb-head .n{font-family:var(--mono);color:var(--orange);font-weight:600}
+.event-line{display:flex;align-items:flex-start;gap:9px;padding:4px 0}
+.event-line .num{
+  flex:0 0 auto;width:20px;height:20px;border-radius:50%;background:var(--yellow);color:var(--yellow-ink);
+  font-family:var(--mono);font-weight:600;font-size:11px;display:flex;align-items:center;justify-content:center;margin-top:1px;
+}
+.event-line .txt{font-size:12px;color:var(--ink-2);line-height:1.4}
+.event-arrow{color:var(--faint);font-size:12px;padding-left:29px;line-height:1.1}
+
+/* run row */
+.run-row{display:flex;align-items:center;justify-content:space-between;margin-top:13px;gap:12px}
+.run-row .hint{font-size:11px;color:var(--faint);font-family:var(--mono)}
+.btn-run{
+  display:inline-flex;align-items:center;gap:7px;background:var(--red);color:#fff;border:none;
+  font-weight:600;font-size:12.5px;padding:9px 16px;border-radius:8px;cursor:pointer;
+  box-shadow:0 2px 8px rgba(229,72,77,.28);transition:transform .12s,box-shadow .12s,background .12s;
+}
+.btn-run:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(229,72,77,.36)}
+.btn-run:active{transform:translateY(0)}
+.btn-run svg{width:14px;height:14px}
+
+/* ============================ RESULT CARDS ============================ */
+.result-meta{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.state-pill{
+  font-family:var(--mono);font-size:10.5px;font-weight:600;padding:4px 9px;border-radius:999px;
+  display:inline-flex;align-items:center;gap:6px;
+}
+.state-pill .led{width:7px;height:7px;border-radius:50%}
+.st-success{background:var(--green-soft);color:var(--green)}
+.st-low{background:var(--orange-soft);color:var(--orange)}
+.st-error{background:var(--red-soft);color:var(--red)}
+.st-none{background:var(--surface-2);color:var(--muted);border:1px solid var(--border)}
+.st-loading{background:var(--surface-2);color:var(--muted);border:1px solid var(--border)}
+.result-meta .spacer{flex:1}
+.result-meta .clk{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+
+/* generic card */
+.card{
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  box-shadow:var(--shadow);padding:0;overflow:hidden;margin-bottom:16px;
+}
+.card-head{
+  display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);
+  background:var(--surface-2);
+}
+.card-head .vid{font-family:var(--mono);font-weight:600;font-size:13px;color:var(--ink)}
+.card-head .kind{font-size:10px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);
+  border:1px solid var(--border);padding:2px 7px;border-radius:5px}
+.card-head .spacer{flex:1}
+.card-head .pick{position:relative;display:flex;align-items:center;margin-right:2px}
+.card-head .pick input{position:absolute;opacity:0;width:18px;height:18px;margin:0;cursor:pointer}
+.card-head .pick .box{width:18px;height:18px;border-radius:5px;border:2px solid var(--border-strong);background:var(--surface);
+  display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:700;font-family:var(--mono)}
+.card-head .pick input:checked + .box{background:var(--red);border-color:var(--red)}
+.card-head .pick input:checked + .box::after{content:"✓"}
+.card.seq.chosen{border-color:var(--red);box-shadow:0 0 0 2px var(--red-soft)}
+.score-big{font-family:var(--mono);font-weight:600;font-size:15px;color:var(--ink)}
+.score-big .lab{font-size:9.5px;color:var(--faint);font-weight:500;display:block;text-transform:uppercase;letter-spacing:.05em;text-align:right}
+.card-body{padding:16px}
+
+/* metric strip */
+.metrics{display:flex;flex-wrap:wrap;gap:0;border-top:1px solid var(--border);background:var(--surface-2)}
+.metric{flex:1 1 0;min-width:96px;padding:10px 14px;border-right:1px solid var(--border)}
+.metric:last-child{border-right:none}
+.metric .m-lab{font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
+.metric .m-val{font-family:var(--mono);font-size:14px;font-weight:600;color:var(--ink);margin-top:2px;font-variant-numeric:tabular-nums}
+.metric .m-val.accent{color:var(--orange)}
+
+/* frame block (KIS / QA) */
+.evidence{display:flex;gap:18px;align-items:flex-start}
+.frame{
+  position:relative;border:1px solid var(--border);border-radius:8px;overflow:hidden;flex:0 0 auto;
+  background:var(--surface-2);
+}
+.frame img,.frame svg{display:block;width:100%;height:100%}
+.frame .ts-burn{
+  position:absolute;left:8px;bottom:8px;font-family:var(--mono);font-size:10px;color:#fff;
+  background:rgba(0,0,0,.62);padding:2px 6px;border-radius:4px;letter-spacing:.03em;
+}
+.frame .rk{
+  position:absolute;right:8px;top:8px;font-family:var(--mono);font-size:10px;font-weight:600;color:#fff;
+  background:var(--red);padding:2px 7px;border-radius:4px;
+}
+.frame-lg{width:340px;aspect-ratio:16/9}
+.evidence-info{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:11px;padding-top:2px}
+.kv{display:grid;grid-template-columns:108px 1fr;gap:6px 12px;align-items:baseline}
+.kv .k{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:600}
+.kv .v{font-family:var(--mono);font-size:12.5px;color:var(--ink);font-variant-numeric:tabular-nums}
+.kv .v.red{color:var(--red);font-weight:600}
+
+.answer-box{
+  border:1px solid var(--border);border-left:3px solid var(--orange);border-radius:7px;
+  background:var(--surface-2);padding:11px 13px;
+}
+.answer-box .a-lab{font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
+.answer-box .a-val{font-family:var(--mono);font-size:18px;font-weight:600;color:var(--ink)}
+.conf-bar{height:5px;border-radius:3px;background:var(--border);overflow:hidden;margin-top:8px}
+.conf-bar > i{display:block;height:100%;background:linear-gradient(90deg,var(--orange),var(--red));border-radius:3px}
+
+.btn-detail{
+  align-self:flex-start;display:inline-flex;align-items:center;gap:6px;cursor:pointer;
+  border:1px solid var(--border-strong);background:var(--surface);color:var(--ink-2);
+  font-weight:600;font-size:11.5px;padding:7px 13px;border-radius:7px;transition:.12s;
+}
+.btn-detail:hover{border-color:var(--red);color:var(--red)}
+.btn-detail svg{width:13px;height:13px}
+
+/* ---- TRAKE layout ---- */
+.trake-head-row{display:flex;gap:18px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--surface-2)}
+.th-item .th-lab{font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
+.th-item .th-val{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--ink);margin-top:2px;font-variant-numeric:tabular-nums}
+.th-item .th-val.accent{color:var(--orange)}
+
+.timeline{display:flex;align-items:center;gap:0;padding:16px 16px 4px;flex-wrap:wrap}
+.tl-node{display:flex;align-items:center;gap:6px}
+.tl-chip{
+  width:26px;height:26px;border-radius:50%;background:var(--yellow);color:var(--yellow-ink);
+  font-family:var(--mono);font-weight:600;font-size:12px;display:flex;align-items:center;justify-content:center;
+  border:1px solid color-mix(in srgb,var(--yellow-ink) 25%,transparent);
+}
+.tl-line{flex:1 1 24px;height:2px;min-width:18px;background:linear-gradient(90deg,var(--border-strong),var(--border-strong));
+  position:relative;border-radius:2px}
+.tl-line::after{content:"";position:absolute;right:-1px;top:50%;transform:translateY(-50%);
+  border-left:6px solid var(--border-strong);border-top:4px solid transparent;border-bottom:4px solid transparent}
+
+.event-grid{display:flex;gap:14px;padding:14px 16px 18px;overflow-x:auto}
+.ev-col{flex:1 1 0;min-width:200px;display:flex;flex-direction:column;gap:9px}
+.ev-col .ev-num{display:flex;align-items:center;gap:7px}
+.ev-col .ev-num .n{width:18px;height:18px;border-radius:50%;background:var(--yellow);color:var(--yellow-ink);
+  font-family:var(--mono);font-weight:600;font-size:10px;display:flex;align-items:center;justify-content:center}
+.ev-col .ev-num .t{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.ev-col .frame{width:100%;aspect-ratio:16/9}
+.ev-col .ev-desc{font-size:11px;color:var(--ink-2);line-height:1.4;min-height:30px}
+.ev-col .ev-scores{display:flex;gap:8px;flex-wrap:wrap}
+.ev-col .sc{font-family:var(--mono);font-size:10.5px;background:var(--surface-2);border:1px solid var(--border);
+  padding:3px 7px;border-radius:5px;color:var(--ink-2)}
+.ev-col .sc b{color:var(--orange);font-weight:600}
+.ev-col .btn-detail{width:100%;justify-content:center}
+
+/* ============================ EMPTY / STATE ============================ */
+.empty{
+  border:1px dashed var(--border-strong);border-radius:var(--radius);background:var(--surface-2);
+  padding:48px 24px;text-align:center;color:var(--muted);
+}
+.empty .big{font-size:15px;font-weight:600;color:var(--ink-2);margin-bottom:6px}
+.empty .sm{font-size:12px}
+.empty svg{width:34px;height:34px;color:var(--faint);margin-bottom:12px}
+
+.banner{
+  display:flex;align-items:center;gap:11px;padding:13px 16px;border-radius:var(--radius);
+  border:1px solid var(--border);margin-bottom:16px;font-size:12.5px;
+}
+.banner .bi{width:30px;height:30px;flex:0 0 auto;border-radius:7px;display:flex;align-items:center;justify-content:center}
+.banner .bt{font-weight:600}
+.banner .bs{color:var(--muted);font-size:11.5px;margin-top:1px}
+.banner.low{background:var(--orange-soft);border-color:color-mix(in srgb,var(--orange) 35%,transparent)}
+.banner.low .bi{background:var(--orange);color:#fff}
+.banner.none{background:var(--surface-2)}
+.banner.none .bi{background:var(--border);color:var(--muted)}
+.banner.error{background:var(--red-soft);border-color:color-mix(in srgb,var(--red) 35%,transparent)}
+.banner.error .bi{background:var(--red);color:#fff}
+
+/* skeleton */
+.skel{position:relative;overflow:hidden;background:var(--surface-2);border-radius:6px}
+.skel::after{content:"";position:absolute;inset:0;transform:translateX(-100%);
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.55),transparent);
+  animation:shimmer 1.2s infinite}
+@keyframes shimmer{100%{transform:translateX(100%)}}
+.skel-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:0;overflow:hidden;margin-bottom:16px}
+.skel-head{height:46px;border-bottom:1px solid var(--border);background:var(--surface-2);display:flex;align-items:center;gap:10px;padding:0 16px}
+.skel-body{padding:16px;display:flex;gap:18px}
+.skel-line{height:11px;border-radius:5px}
+.skel-frame{width:340px;aspect-ratio:16/9;border-radius:8px}
+
+/* ============================ CANDIDATE GALLERY ============================ */
+.gallery{display:flex;flex-direction:column;gap:14px}
+.gal-row{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.gal-row.is-chosen{outline:2px solid var(--red);outline-offset:3px;border-radius:10px}
+.nb-row{grid-template-columns:1fr}
+.cand{position:relative;border:1px solid var(--border);border-radius:9px;overflow:hidden;background:var(--surface);
+  display:flex;flex-direction:column;transition:border-color .12s,box-shadow .12s}
+.cand:hover{border-color:var(--border-strong);box-shadow:var(--shadow)}
+.cand.chosen{border-color:var(--red);box-shadow:0 0 0 2px var(--red-soft)}
+.cand .fr{position:relative;aspect-ratio:16/9;background:var(--surface-2)}
+.cand .fr img{display:block;width:100%;height:100%}
+.cand .fr .ts-burn{position:absolute;left:7px;bottom:7px;font-family:var(--mono);font-size:9.5px;color:#fff;
+  background:rgba(0,0,0,.62);padding:2px 5px;border-radius:4px}
+.cand .pick{position:absolute;top:7px;left:7px;display:flex;align-items:center;gap:5px;z-index:3}
+.cand .pick input{position:absolute;opacity:0;width:18px;height:18px;margin:0;cursor:pointer}
+.cand .pick .box{width:18px;height:18px;border-radius:5px;border:2px solid #fff;background:rgba(0,0,0,.35);
+  display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:700;font-family:var(--mono)}
+.cand .pick input:checked + .box{background:var(--red);border-color:var(--red)}
+.cand .pick input:checked + .box::after{content:"✓"}
+.cand .rank{position:absolute;top:7px;right:7px;font-family:var(--mono);font-size:9.5px;font-weight:600;color:#fff;
+  background:var(--red);padding:2px 6px;border-radius:4px;opacity:0;transition:opacity .12s}
+.cand.chosen .rank{opacity:1}
+.cand .meta{padding:8px 9px 9px;display:flex;flex-direction:column;gap:6px}
+.cand .meta .vid{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--ink)}
+.cand .meta .sc{display:flex;align-items:center;justify-content:space-between}
+.cand .meta .sc .lab{font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:600}
+.cand .meta .sc .num{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--orange)}
+.cand .btn-detail{align-self:stretch;justify-content:center;font-size:10.5px;padding:6px 8px;
+  border:1px solid var(--border);background:var(--surface-2);color:var(--ink-2);border-radius:6px;cursor:pointer;
+  display:inline-flex;align-items:center;gap:5px;font-weight:600;transition:.12s}
+.cand .btn-detail:hover{border-color:var(--red);color:var(--red)}
+.cand .btn-detail svg{width:12px;height:12px}
+.chosen-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:11px 14px;border-bottom:1px solid var(--border);
+  background:var(--red-soft)}
+.chosen-bar .cb-lab{font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--red)}
+.chosen-bar .cb-chips{display:flex;flex-wrap:wrap;gap:6px}
+.cb-chip{font-family:var(--mono);font-size:10.5px;background:var(--surface);border:1px solid var(--red);color:var(--red);
+  padding:3px 8px;border-radius:999px;display:inline-flex;align-items:center;gap:5px}
+.cb-chip .x{cursor:pointer;opacity:.6;font-weight:700}
+.cb-chip .x:hover{opacity:1}
+.chosen-bar .cb-hint{font-size:10.5px;color:var(--muted);margin-left:auto}
+.chosen-prefix{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink-2);margin-bottom:2px}
+.chosen-prefix .tag{font-family:var(--mono);font-size:10px;font-weight:600;color:#fff;background:var(--red);padding:2px 7px;border-radius:5px}
+
+/* ============================ MANUAL VERIFY / EXPORT ============================ */
+.manual{border:1px solid var(--border);border-radius:var(--radius);background:var(--surface-2);margin-top:16px;overflow:hidden}
+.manual-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:11px 14px;border-bottom:1px solid var(--border);background:var(--surface)}
+.manual-head .mh-title{font-weight:600;font-size:12.5px;color:var(--ink)}
+.manual-head .mh-sub{font-size:11px;color:var(--muted)}
+.manual-rows{padding:12px 14px;display:flex;flex-direction:column;gap:9px}
+.manual-row{display:flex;align-items:center;gap:10px}
+.manual-row .mr-id{display:flex;align-items:center;gap:7px;width:230px;flex:0 0 auto;font-family:var(--mono);font-size:11px;color:var(--ink-2)}
+.manual-row .rank-tag{background:var(--red);color:#fff;font-weight:600;font-size:10px;padding:2px 6px;border-radius:4px}
+.manual-row .mr-vid{font-weight:600;color:var(--ink)}
+.manual-row .mr-fid{color:var(--orange)}
+.manual-row .mr-ts{color:var(--faint)}
+.manual-row .man-input{flex:1}
+.export-bar{display:flex;align-items:center;gap:12px;padding:11px 14px;border-top:1px solid var(--border);background:var(--surface);flex-wrap:wrap}
+.export-bar .ex-lab{font-size:11px;font-weight:600;color:var(--ink)}
+.export-bar .ex-fmt{font-family:var(--mono);font-size:10.5px;color:var(--orange)}
+.export-bar .ex-count{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.csv-preview{margin:0;padding:12px 14px;background:var(--bg);font-family:var(--mono);font-size:11px;color:var(--ink-2);
+  white-space:pre-wrap;word-break:break-all;border-top:1px solid var(--border);line-height:1.6}
+
+/* ============================ MODAL ============================ */
+.overlay{position:fixed;inset:0;background:rgba(15,17,21,.46);backdrop-filter:blur(2px);
+  display:none;align-items:flex-start;justify-content:flex-end;z-index:100;padding:0}
+.overlay.open{display:flex}
+.drawer{
+  width:440px;max-width:92vw;height:100vh;background:var(--surface);border-left:1px solid var(--border);
+  box-shadow:var(--shadow-pop);overflow-y:auto;animation:slideIn .22s ease;
+}
+@keyframes slideIn{from{transform:translateX(24px);opacity:.4}to{transform:translateX(0);opacity:1}}
+.drawer-head{position:sticky;top:0;display:flex;align-items:center;justify-content:space-between;
+  padding:14px 18px;border-bottom:1px solid var(--border);background:var(--surface);z-index:2}
+.drawer-head .dh-title{font-weight:700;font-size:14px}
+.drawer-head .dh-sub{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-top:1px}
+.drawer-body{padding:16px 18px 40px}
+.drawer-body .frame{width:100%;aspect-ratio:16/9;margin-bottom:14px}
+.d-section{margin-bottom:18px}
+.d-section .ds-h{font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);margin-bottom:9px;
+  display:flex;align-items:center;gap:7px}
+.d-section .ds-h::before{content:"";width:3px;height:12px;background:var(--red);border-radius:2px}
+.d-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.d-cell{border:1px solid var(--border);border-radius:7px;padding:9px 11px;background:var(--surface-2)}
+.d-cell .c-l{font-size:9.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
+.d-cell .c-v{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--ink);margin-top:3px;font-variant-numeric:tabular-nums}
+.d-cell .c-v.accent{color:var(--orange)}
+.d-tags{display:flex;flex-wrap:wrap;gap:6px}
+.d-tag{font-family:var(--mono);font-size:10.5px;background:var(--surface-2);border:1px solid var(--border);
+  color:var(--ink-2);padding:3px 8px;border-radius:5px}
+.d-tag.asr{border-color:color-mix(in srgb,var(--red) 35%,transparent);color:var(--red)}
+.model-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.model-row .mr-name{font-family:var(--mono);font-size:11px;color:var(--ink-2);width:120px;flex:0 0 auto}
+.model-row .mr-track{flex:1;height:6px;background:var(--border);border-radius:4px;overflow:hidden}
+.model-row .mr-track > i{display:block;height:100%;background:linear-gradient(90deg,var(--orange),var(--red))}
+.model-row .mr-val{font-family:var(--mono);font-size:10.5px;color:var(--muted);width:42px;text-align:right}
+
+@media (prefers-reduced-motion: reduce){
+  *{animation:none!important;transition:none!important}
+  .skel::after{animation:none;background:var(--border)}
+}
+@media (max-width:880px){
+  .sidebar{width:260px;flex-basis:260px}
+  .evidence{flex-direction:column}
+  .frame-lg{width:100%}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <!-- ===================== SIDEBAR ===================== -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="mark horse-mark"><svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="PEGASUS unicorn"><path d="m15.6 4.8 2.7 2.3M15.5 10S19 7 22 2c-6 2-10 5-10 5m-.5 5H11"/><path d="M5 15a4 4 0 0 0 4 4h7.8l.3.3a3 3 0 0 0 4-4.46L12 7c0-3-1-5-1-5S8 3 8 7c-4 1-6 3-6 3"/><path d="M2 4.5C4 3 6 3 6 3l2 4M6.14 17.8S4 19 2 22"/></svg></div>
+      <div>
+        <div class="name">PEGASUS</div>
+        <div class="sub">Video Retrieval</div>
+      </div>
+    </div>
+    <div class="side-scroll">
+      <div class="section-label"><span class="dot"></span>Chọn chế độ</div>
+      <div class="mode-list" id="modeList">
+        <div class="mode" data-mode="kis">
+          <div class="code">KIS</div>
+          <div><div class="title">Known Item Search</div><div class="desc">1 best frame per query</div></div>
+          <div class="radio"></div>
+        </div>
+        <div class="mode" data-mode="qa">
+          <div class="code">QA</div>
+          <div><div class="title">Question Answering</div><div class="desc">1 evidence frame + answer</div></div>
+          <div class="radio"></div>
+        </div>
+        <div class="mode" data-mode="trake">
+          <div class="code">TRK</div>
+          <div><div class="title">TRAKE</div><div class="desc">N events · temporal align</div></div>
+          <div class="radio"></div>
+        </div>
+        <div class="mode" data-mode="notebook">
+          <div class="code">NB</div>
+          <div><div class="title">NOTEBOOK</div><div class="desc">Video-level ranking</div></div>
+          <div class="radio"></div>
+        </div>
+      </div>
+
+      <div class="section-label"><span class="dot"></span>Cấu hình</div>
+      <div class="config" id="config"></div>
+    </div>
+
+    <div class="side-foot">
+      <div class="field" style="margin-bottom:11px">
+        <label>Backend URL</label>
+        <input class="txt" id="backendUrl" value="http://127.0.0.1:8000" spellcheck="false">
+      </div>
+      <div class="demo-label">UI · result state</div>
+      <div class="chips" id="stateChips">
+        <span class="chip" data-state="empty">empty</span>
+        <span class="chip" data-state="loading">loading</span>
+        <span class="chip on" data-state="empty">empty</span>
+        <span class="chip" data-state="low">low conf</span>
+        <span class="chip" data-state="none">no result</span>
+        <span class="chip" data-state="error">error</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ===================== WORKSPACE ===================== -->
+  <main class="workspace">
+    <div class="topbar">
+      <div class="crumb">
+        <span class="mode-chip" id="crumbMode">KIS</span>
+        <span class="sep">/</span>
+        <span class="title" id="crumbTitle">Known Item Search</span>
+      </div>
+      <div class="spacer"></div>
+      <button class="icon-btn" id="themeBtn" title="Toggle theme">◐</button>
+    </div>
+
+    <div class="main">
+      <!-- Query panel -->
+      <div class="query-card">
+        <div class="q-head">
+          <span class="lbl" id="qLabel">Query</span>
+          <span class="meta" id="qMeta"></span>
+        </div>
+        <textarea class="query" id="queryInput" spellcheck="false"></textarea>
+
+        <!-- Ô phụ: query tiếng Việt cho ASR (khớp transcript Whisper). Chỉ hiện khi
+             bật toggle ASR — vì transcript là tiếng Việt, query chính (có thể tiếng
+             Anh) không khớp được BM25. Để trống = dùng query chính cho cả ASR. -->
+        <div class="asr-query-wrap" id="asrQueryWrap" style="display:none">
+          <label class="asr-query-label" for="asrQuery">Query ASR (tiếng Việt)</label>
+          <input class="txt asr-query-input" id="asrQuery" type="text"
+                 placeholder="Từ khóa lời nói trong video (VD: người đàn ông nói nhớ)…" />
+          <div class="asr-query-hint">Transcript ASR là tiếng Việt — nhập từ khóa tiếng Việt để khớp lời nói.</div>
+        </div>
+
+        <div id="eventsBlock"></div>
+
+        <div class="run-row">
+          <span class="hint" id="runHint">⌘/Ctrl + Enter to run</span>
+          <button class="btn-run" id="runBtn">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            Run query
+          </button>
+        </div>
+      </div>
+
+      <!-- Manual answer (QA) — ngay dưới query để tiện điền rồi nộp -->
+      <div id="manualSlot"></div>
+
+      <!-- Results -->
+      <div id="results"></div>
+    </div>
+  </main>
+</div>
+
+<!-- ===================== DETAIL DRAWER ===================== -->
+<div class="overlay" id="overlay">
+  <div class="drawer" id="drawer">
+    <div class="drawer-head">
+      <div>
+        <div class="dh-title" id="dTitle">Frame detail</div>
+        <div class="dh-sub" id="dSub"></div>
+      </div>
+      <button class="icon-btn" id="closeDrawer">✕</button>
+    </div>
+    <div class="drawer-body" id="drawerBody"></div>
+  </div>
+</div>
+
+<script>
+/* ===================== SAMPLE DATA ===================== */
+/* Không còn dữ liệu demo. Mọi giá trị hiển thị lấy từ kết quả retrieval thật
+   (S.cands) hoặc trạng thái rỗng. Không hardcode video/answer/event ở đây nữa. */
+const DATA = { kis:{}, qa:{}, trake:{} };
+
+/* procedural frame placeholder (no external assets) */
+function frameURI(seed,w,h){
+  const hues=[[210,18],[205,14],[32,16],[150,12],[260,12]];
+  const [h0,s0]=hues[seed%hues.length];
+  const h1=(h0+18)%360, h2=(h0+40)%360;
+  const svg=`<svg xmlns='http://www.w3.org/2000/svg' width='${w}' height='${h}' viewBox='0 0 ${w} ${h}'>
+    <defs>
+      <linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>
+        <stop offset='0' stop-color='hsl(${h0} ${s0}% 72%)'/>
+        <stop offset='.55' stop-color='hsl(${h1} ${s0}% 60%)'/>
+        <stop offset='1' stop-color='hsl(${h2} ${s0}% 46%)'/>
+      </linearGradient>
+      <radialGradient id='v' cx='50%' cy='42%' r='75%'>
+        <stop offset='.6' stop-color='rgba(0,0,0,0)'/>
+        <stop offset='1' stop-color='rgba(0,0,0,.28)'/>
+      </radialGradient>
+    </defs>
+    <rect width='100%' height='100%' fill='url(#g)'/>
+    <g opacity='.5' fill='rgba(255,255,255,.14)'>
+      <rect x='${w*0.12}' y='${h*0.20}' width='${w*0.40}' height='${h*0.46}' rx='6'/>
+      <rect x='${w*0.58}' y='${h*0.30}' width='${w*0.28}' height='${h*0.40}' rx='6'/>
+      <circle cx='${w*0.30}' cy='${h*0.74}' r='${w*0.07}'/>
+    </g>
+    <g stroke='rgba(255,255,255,.18)' stroke-width='1'>
+      <line x1='0' y1='${h*0.5}' x2='${w}' y2='${h*0.5}'/>
+      <line x1='${w*0.5}' y1='0' x2='${w*0.5}' y2='${h}'/>
+    </g>
+    <rect width='100%' height='100%' fill='url(#v)'/>
+  </svg>`;
+  return "data:image/svg+xml;utf8,"+encodeURIComponent(svg);
+}
+
+/* ===================== STATE ===================== */
+const S={mode:"kis", ui:"empty", sel:[], cands:{}, trakeEvents:[], fallback:null, submitName:"", csvName:"", model:{kis:"SigLIP2-base", qa:"SigLIP2-base", trake:"SigLIP2-base", notebook:"qwen2.5:1.5b"}};
+
+const MODE_TITLE={kis:"Known Item Search", qa:"Question Answering", trake:"TRAKE · Temporal Retrieval", notebook:"NOTEBOOK · Video Search"};
+
+const CONFIG={
+  kis:()=>`
+    <div class="row2">
+      <div class="field"><label>Kết quả trả về</label><input class="txt" type="number" value="100" min="1" max="100"></div>
+      <div class="field"><label>Top-K candidate</label><input class="txt" type="number" value="200" min="10" step="10"></div>
+    </div>
+    <div class="field">
+      <div class="range-head"><label>Similarity threshold</label><span class="val">0.55</span></div>
+      <input type="range" class="thr" min="0" max="1" step="0.01" value="0.55">
+    </div>
+    <div class="field"><label>Model / embedding</label>
+      <select class="sel"><option>SigLIP2-base</option></select>
+    </div>
+    <div class="toggle"><div><div class="t-label">ASR</div><div class="t-sub">Whisper transcript match</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="asr"><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="RRF chỉ tạo Top-N candidate pool, Adaptive Fusion (semantic/object/asr) là FINAL ranking. Tắt = RRF equal-weight baseline."><div><div class="t-label">Adaptive Fusion</div><div class="t-sub">RRF→semantic+object+asr</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="fusion_adaptive" checked><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="Event Coverage: ưu tiên frame giải thích được NHIỀU event của query dài/action-chain. Fix 'query A mà trả B'."><div><div class="t-label">Event coverage</div><div class="t-sub">multi-event precision</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="event_coverage"><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="Query understanding (LLM) để sinh QueryPlan có trọng số modality cho Adaptive fusion. Tắt = query nguyên bản."><div><div class="t-label">Query planner</div><div class="t-sub">LLM modality weights</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="planner"><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="Late-interaction (ColBERT MaxSim): rerank top-K bằng per-facet cosine similarity. Chống chọn nhầm frame đúng cảnh sai vật thể. Local, miễn phí."><div><div class="t-label">Late interaction</div><div class="t-sub">facet MaxSim rerank</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="late_interaction" checked><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="Gom frame trùng cảnh trong cùng video, giữ frame tốt nhất trước video-level rerank."><div><div class="t-label">Temporal dedupe</div><div class="t-sub">frame dedup before rerank</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="dedupe_window" checked><span class="track"></span><span class="knob"></span></label></div>
+  `,
+  qa:()=>`
+    <div class="row2">
+      <div class="field"><label>Kết quả trả về</label><input class="txt" type="number" value="100" min="1" max="100"></div>
+      <div class="field"><label>Top-K retrieval</label><input class="txt" type="number" value="50" min="5" step="5"></div>
+    </div>
+    <div class="field"><label>Model / embedding</label>
+        <select class="sel"><option>SigLIP2-base</option></select></div>
+    <div class="toggle"><div><div class="t-label">Visual verification</div><div class="t-sub">VLM re-check evidence</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="visual"><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle"><div><div class="t-label">ASR</div><div class="t-sub">Spoken answer match</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="asr"><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="BLIP-2 / Florence-2 cross-encoder reranker. Reuses Florence-2 VLM already loaded for QA — scores each frame-image vs query with LM-head likelihood."><div><div class="t-label">BLIP-2 rerank</div><div class="t-sub">Florence-2 cross-encoder</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="blip2_rerank"><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle"><div><div class="t-label">Answer extraction</div><div class="t-sub">Florence-2 / LLM</div></div>
+      <label class="switch"><input type="checkbox" id="qaVlm" data-cfg="vlm"><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="Refactor: RRF chỉ tạo Top-N candidate pool, Adaptive Fusion (semantic/object/asr) là FINAL ranking. Tắt = RRF equal-weight là kết quả cuối (baseline A/B). BẬT MẶC ĐỊNH."><div><div class="t-label">Fusion final tier</div><div class="t-sub">RRF→Adaptive</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="fusion_adaptive"><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="Refactor: temporal reranking SAU Adaptive Fusion — xếp lại frame theo độ gắn kết thời gian trong video. Tắt = giữ thứ tự fusion thuần."><div><div class="t-label">Temporal rerank</div><div class="t-sub">after fusion</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="temporal_rerank"><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="Event Coverage (spec §4): ưu tiên frame giải thích được NHIỀU event của query dài/action-chain lên frame chỉ khớp 1 clause. Fix 'query A mà trả B'."><div><div class="t-label">Event coverage</div><div class="t-sub">multi-event precision</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="event_coverage"><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="Moment rerank (spec §9): gom near-duplicate frame cùng shot thành 1 moment, chọn 1 best evidence frame."><div><div class="t-label">Moment rerank</div><div class="t-sub">best frame / moment</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="moment_rerank"><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="Bật Query understanding (local LLM Ollama) để sinh QueryPlan có trọng số modality cho Adaptive fusion. Tắt = query nguyên bản."><div><div class="t-label">Query planner</div><div class="t-sub">LLM modality weights</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="planner"><span class="track"></span><span class="knob"></span></label></div>
+      <label class="switch"><input type="checkbox" data-cfg="late_interaction" checked><span class="track"></span><span class="knob"></span></label></div>
+  `,
+  trake:()=>`
+    <div class="row2">
+      <div class="field"><label>Kết quả trả về (sequences)</label><input class="txt" type="number" value="100" min="1" max="100"></div>
+      <div class="field"><label>Top-K candidate</label><input class="txt" type="number" value="150" min="10" step="10"></div>
+    </div>
+    <div class="field">
+      <div class="range-head"><label>Similarity threshold</label><span class="val">0.55</span></div>
+      <input type="range" class="thr" min="0" max="1" step="0.01" value="0.55">
+    </div>
+    <div class="field"><label>Model / embedding</label>
+      <select class="sel"><option>SigLIP2-base</option></select></div>
+    <div class="toggle"><div><div class="t-label">ASR</div><div class="t-sub">Event transcript</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="asr"><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="BLIP-2 / Florence-2 cross-encoder reranker. Reuses Florence-2 VLM already loaded for QA — scores each frame-image vs query with LM-head likelihood."><div><div class="t-label">BLIP-2 rerank</div><div class="t-sub">Florence-2 cross-encoder</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="blip2_rerank" checked><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="Paper Eq.6-7: chấm điểm TRAKE bằng SS(final)=Σ s_i·λ_i·b_i (gate nhân 3 thành phần semantic × temporal × fine-grained). Tắt = additive alignment_score (baseline A)."><div><div class="t-label">TRAKE gating</div><div class="t-sub">Eq.6-7 multiplicative</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="trake_gating"><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="Late-interaction (ColBERT-style MaxSim theo từng facet query). Rerank top-K bằng max-i(cosine(facet, frame)) rồi SRRF-fuse với SigLIP2. Giúp embedding không chọn nhầm frame đúng cảnh sai vật thể. Local, miễn phí, vài chục encode text."><div><div class="t-label">Late interaction</div><div class="t-sub">facet MaxSim rerank</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="late_interaction" checked><span class="track"></span><span class="knob"></span></label></div>
+  `,
+  notebook:()=>`
+    <div class="row2">
+      <div class="field"><label>Top N videos</label><input class="txt" type="number" value="5" min="1" max="20" id="nbTopN"></div>
+      <div class="field"><label>LLM model</label>
+        <select class="sel" id="nbModel"><option>qwen2.5:1.5b</option><option>qwen2.5:3b</option></select></div>
+    </div>
+    <div class="toggle"><div><div class="t-label">ASR retrieval</div><div class="t-sub">BM25 on Vietnamese transcripts</div></div>
+      <label class="switch"><input type="checkbox" checked data-cfg="nb_asr" disabled><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="Bật visual retrieval (SigLIP2) bổ sung candidate videos. Tắt = chỉ dùng ASR BM25."><div><div class="t-label">Visual retrieval</div><div class="t-sub">SigLIP2 optional</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="nb_visual"><span class="track"></span><span class="knob"></span></label></div>
+    <div class="toggle" title="Query planner dùng LLM local để decompose query. Tắt = rule-based fallback."><div><div class="t-label">LLM planner</div><div class="t-sub">qwen2.5:1.5b no-think</div></div>
+      <label class="switch"><input type="checkbox" data-cfg="nb_planner" checked><span class="track"></span><span class="knob"></span></label></div>
+  `
+};
+
+/* ===================== RENDER ===================== */
+function wireThreshold(){
+  // Cập nhật label hiển thị khi kéo thanh Similarity threshold; nếu rỗng → 0.00.
+  const root=document.getElementById("config");
+  const range=root.querySelector('input[type=range].thr');
+  const val=root.querySelector('.range-head .val');
+  if(!range||!val)return;
+  val.textContent=(parseFloat(range.value)||0).toFixed(2);
+  range.addEventListener('input',()=>{ val.textContent=(parseFloat(range.value)||0).toFixed(2); });
+}
+function renderSidebar(){
+  document.querySelectorAll(".mode").forEach(m=>m.classList.toggle("active",m.dataset.mode===S.mode));
+  document.getElementById("config").innerHTML=CONFIG[S.mode]();
+  document.getElementById("crumbMode").textContent=S.mode.toUpperCase()==="TRAKE"?"TRAKE":S.mode.toUpperCase();
+  document.getElementById("crumbTitle").textContent=MODE_TITLE[S.mode];
+  wireThreshold();
+}
+function renderQuery(){
+  const q=document.getElementById("queryInput");
+  const meta=document.getElementById("qMeta");
+  const label=document.getElementById("qLabel");
+  const eb=document.getElementById("eventsBlock");
+  const hint=document.getElementById("runHint");
+  // Ô query để TRỐNG hoàn toàn — KHÔNG hiển thị câu ví dụ (tránh hiểu lầm là
+  // query mặc định). Placeholder chỉ là hướng dẫn ngắn; DATA.*.q chỉ dùng cho
+  // kết quả demo fallback khi backend offline.
+  if(S.mode==="kis"){label.textContent="Query";q.placeholder="Nhập mô tả cảnh cần tìm…";q.value="";meta.textContent="KIS · 1 best frame";hint.textContent="⌘/Ctrl + Enter to run";eb.innerHTML="";}
+  if(S.mode==="qa"){label.textContent="Question";q.placeholder="Nhập câu hỏi…";q.value="";meta.textContent="QA · 1 evidence + answer";hint.textContent="⌘/Ctrl + Enter to run";eb.innerHTML="";}
+  if(S.mode==="trake"){
+    label.textContent="Query · multi-event";q.placeholder="Nhập chuỗi sự kiện (E1: … E2: … E3: …)";q.value="";
+    meta.textContent="TRAKE · multi-event";
+    eb.innerHTML="";
+  }
+  if(S.mode==="notebook"){
+    label.textContent="Query · video search";q.placeholder="Nhập query tự nhiên (có thể dài)…";q.value="";
+    meta.textContent="NOTEBOOK · top N videos";
+    eb.innerHTML="";
+  }
+  updateAsrQueryVisibility();
+}
+// Hiện ô query ASR (tiếng Việt) chỉ khi toggle ASR được bật; đổi mode thì xoá nội dung.
+function updateAsrQueryVisibility(){
+  const asrOn=[...document.querySelectorAll('input[type=checkbox][data-cfg="asr"]')]
+    .some(t=>t.checked);
+  const wrap=document.getElementById("asrQueryWrap");
+  if(wrap) wrap.style.display=asrOn?"block":"none";
+  const inp=document.getElementById("asrQuery");
+  if(inp && !asrOn) inp.value="";
+}
+
+function statePill(){
+  const map={
+    success:["st-success","●","Success"],
+    low:["st-low","▲","Potential match"],
+    error:["st-error","✕","Error"],
+    none:["st-none","–","No result"],
+    loading:["st-loading","◌","Searching…"],
+    empty:["st-none","–","Idle"]
+  };
+  const [cls,led,txt]=map[S.ui]||map.empty;
+  return `<span class="state-pill ${cls}"><span class="led" style="background:currentColor"></span>${txt}</span>`;
+}
+
+function skeletonCard(){
+  return `<div class="skel-card">
+    <div class="skel-head"><div class="skel" style="width:110px;height:13px"></div>
+      <div class="skel" style="width:54px;height:13px;margin-left:auto"></div></div>
+    <div class="skel-body">
+      <div class="skel skel-frame"></div>
+      <div style="flex:1;display:flex;flex-direction:column;gap:10px;padding-top:4px">
+        <div class="skel skel-line" style="width:60%"></div>
+        <div class="skel skel-line" style="width:80%"></div>
+        <div class="skel skel-line" style="width:45%"></div>
+        <div class="skel skel-line" style="width:70%"></div>
+      </div>
+    </div>
+    <div class="metrics" style="border-top:1px solid var(--border)">
+      <div class="metric"><div class="skel" style="width:46px;height:10px"></div><div class="skel" style="width:40px;height:14px;margin-top:6px"></div></div>
+      <div class="metric"><div class="skel" style="width:46px;height:10px"></div><div class="skel" style="width:40px;height:14px;margin-top:6px"></div></div>
+      <div class="metric"><div class="skel" style="width:46px;height:10px"></div><div class="skel" style="width:40px;height:14px;margin-top:6px"></div></div>
+    </div>
+  </div>`;
+}
+
+function banner(kind,icon,title,sub){
+  return `<div class="banner ${kind}"><div class="bi">${icon}</div>
+    <div><div class="bt">${title}</div><div class="bs">${sub}</div></div></div>`;
+}
+
+function trakeCard(){
+  /* deprecated: demo-only, removed */
+  return "";
+}
+
+/* ---- TRAKE multi-sequence gallery ---- */
+function genSeqs(){
+  return [];   // không còn sinh demo; chỉ trả về rỗng, UI hiện empty state
+}
+function seqCard(seq){
+  const chosen=S.sel.includes(seq.i);
+  const temporal=(seq.evs.reduce((a,e)=>a+e.tmp,0)/seq.evs.length).toFixed(3);
+  return `<div class="card seq${chosen?' chosen':''}" data-i="${seq.i}">
+    <div class="card-head">
+      <span class="pick"><input type="checkbox" ${chosen?'checked':''} onchange="togglePick(${seq.i})" aria-label="pick sequence"><span class="box"></span></span>
+      <span class="vid">${seq.vid}</span>
+      <span class="kind">TRAKE · sequence</span>
+      <span class="spacer"></span>
+      <div class="score-big"><span class="lab">Final Score</span>${seq.final.toFixed(4)}</div>
+    </div>
+    <div class="trake-head-row">
+      <div class="th-item"><div class="th-lab">Events</div><div class="th-val accent">${seq.evs.length}</div></div>
+      <div class="th-item"><div class="th-lab">Duration</div><div class="th-val">${seq.duration}</div></div>
+      <div class="th-item"><div class="th-lab">α</div><div class="th-val">${seq.alpha.toFixed(3)}</div></div>
+      <div class="th-item"><div class="th-lab">Temporal</div><div class="th-val">${temporal}</div></div>
+    </div>
+    <div class="timeline">
+      ${seq.evs.map((e,k)=>`<div class="tl-node"><span class="tl-chip">${e.n}</span></div>${k<seq.evs.length-1?'<div class="tl-line"></div>':''}`).join("")}
+    </div>
+    <div class="event-grid">
+      ${seq.evs.map(e=>`<div class="ev-col">
+        <div class="ev-num"><span class="n">${e.n}</span><span class="t">${e.ts}</span></div>
+        <div class="frame"><img src="${e.img||frameURI(e.seed,360,202)}" alt="event ${e.n}"><span class="ts-burn">${e.ts}</span></div>
+        <div class="ev-desc">${e.desc}</div>
+        <div class="ev-scores"><span class="sc">score <b>${e.fin.toFixed(4)}</b></span><span class="sc">sem <b>${e.sem.toFixed(2)}</b></span><span class="sc">tmp <b>${e.tmp.toFixed(2)}</b></span></div>
+        <button class="btn-detail" onclick="openDetail('trake',${seq.i},${e.n})">Chi tiết</button>
+      </div>`).join("")}
+    </div>
+  </div>`;
+}
+function trakeGallery(){
+  const list=S.cands.trake||[];
+  if(!list.length) return `<div class="empty-hint">Chưa có kết quả. Nhập query và bấm Run để retrieval.</div>`;
+  const selected=new Set(S.sel);
+  const ordered=[...S.sel.map(i=>list[i]).filter(Boolean), ...list.filter(s=>!selected.has(s.i))];
+  return chosenBar(list) + ordered.map(seqCard).join("");
+}
+
+/* ---- NOTEBOOK video-level ranking ---- */
+function notebookCard(c){
+  const chosen=S.sel.includes(c.i);
+  const evHtml=(c.events||[]).map((e,j)=>`<span class="sc">E${j+1} ${e.matched?'✓':'✗'} <b>${e.ts||''}</b></span>`).join("");
+  const snippetHtml=(c.snippets||[]).map(s=>`<div style="font-size:11px;color:var(--ink-2);line-height:1.4;padding:3px 0;border-bottom:1px solid var(--border)">💬 ${s}</div>`).join("");
+  const frameImg=c.eframe?`<img src="${imgUrl(c.eframe)}" alt="frame" style="width:160px;height:90px;object-fit:cover;border-radius:6px;border:1px solid var(--border)" onerror="this.style.display='none'">`:'';
+  const frameLink=(c.fid!=null)?`<a href="${c.video}" target="_blank" rel="noopener" style="text-decoration:none;font-size:11px;color:var(--accent)">frame ${c.fid} · t=${(c.ets||0).toFixed(1)}s ▶</a>`:'';
+  return `<div class="card${chosen?' chosen':''}" data-i="${c.i}">
+    <div class="card-head">
+      <span class="pick"><input type="checkbox" ${chosen?'checked':''} onchange="togglePick(${c.i})" aria-label="pick video"><span class="box"></span></span>
+      <span class="vid">${c.vid}</span>
+      <span class="kind">NOTEBOOK · video</span>
+      <span class="spacer"></span>
+      <div class="score-big"><span class="lab">Score</span>${c.sc.toFixed(4)}</div>
+    </div>
+    <div class="card-body">
+      <div style="display:flex;gap:18px;align-items:flex-start">
+        ${frameImg?`<div style="flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:4px">${frameImg}${frameLink}</div>`:''}
+        <div style="flex:1 1 auto;min-width:0">
+          <div class="kv" style="margin-bottom:10px">
+            <div class="k">Video ID</div><div class="v">${c.vid}</div>
+            <div class="k">Score</div><div class="v accent">${c.sc.toFixed(4)}</div>
+            <div class="k">Coverage</div><div class="v">${(c.coverage||0).toFixed(2)}</div>
+            <div class="k">Temporal</div><div class="v">${(c.temporal||0).toFixed(2)}</div>
+            <div class="k">Evidence</div><div class="v">${(c.evidence_count||0)} segments</div>
+          </div>
+          ${c.events&&c.events.length?`<div style="margin-bottom:8px"><div style="font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">Matched Events</div><div style="display:flex;flex-wrap:wrap;gap:5px">${evHtml}</div></div>`:''}
+          ${c.timestamps&&c.timestamps.length?`<div style="margin-bottom:8px"><div style="font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">Evidence Timestamps</div><div style="display:flex;flex-wrap:wrap;gap:5px">${c.timestamps.map(t=>`<span class="sc">${t}</span>`).join("")}</div></div>`:''}
+          ${snippetHtml?`<div style="margin-top:8px"><div style="font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">ASR Evidence</div>${snippetHtml}</div>`:''}
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="btn-detail" onclick="openDetail('notebook',${c.i})">Chi tiết</button>
+        ${c.video?`<a class="btn-detail" style="display:inline-flex;text-decoration:none" href="${c.video}" target="_blank" rel="noopener">▶ Open Video</a>`:''}
+      </div>
+    </div>
+    <div class="metrics">
+      <div class="metric"><div class="m-lab">Score</div><div class="m-val accent">${c.sc.toFixed(4)}</div></div>
+      <div class="metric"><div class="m-lab">Coverage</div><div class="m-val">${(c.coverage||0).toFixed(2)}</div></div>
+      <div class="metric"><div class="m-lab">Temporal</div><div class="m-val">${(c.temporal||0).toFixed(2)}</div></div>
+      <div class="metric"><div class="m-lab">Events</div><div class="m-val">${(c.matched_events||0)}/${(c.total_events||0)}</div></div>
+      <div class="metric"><div class="m-lab">Segments</div><div class="m-val">${c.evidence_count||0}</div></div>
+    </div>
+  </div>`;
+}
+function notebookGallery(){
+  const list=S.cands.notebook||[];
+  if(!list.length) return `<div class="empty-hint">Chưa có kết quả. Nhập query và bấm Run để retrieval.</div>`;
+  const selected=new Set(S.sel);
+  const ordered=[...S.sel.map(i=>list[i]).filter(Boolean), ...list.filter(c=>!selected.has(c.i))];
+  return chosenBar(list) + `<div class="gallery">${ordered.map(c=>`<div class="gal-row nb-row">${notebookCard(c)}</div>`).join("")}</div>`;
+}
+
+function emptyState(){
+  return `<div class="empty">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18M8 14h5"/></svg>
+    <div class="big">No query run yet</div>
+    <div class="sm">Enter a ${S.mode==='qa'?'question':S.mode==='trake'?'multi-event query':S.mode==='notebook'?'long complex query':'description'} above, then press <b>Run query</b>.</div>
+  </div>`;
+}
+
+/* ---- Candidate gallery (KIS / QA) ---- */
+function candCard(c,mode){
+  const chosen=S.sel.includes(c.i);
+  return `<div class="cand${chosen?' chosen':''}" data-i="${c.i}" data-vid="${c.vid}" data-fid="${c.fid}" tabindex="0">
+    <div class="pick">
+      <input type="checkbox" ${chosen?'checked':''} onchange="togglePick(${c.i})" aria-label="pick as top">
+      <span class="box"></span>
+    </div>
+    <span class="rank">#${S.sel.indexOf(c.i)+1}</span>
+    <div class="fr"><img src="${c.img||frameURI(c.seed,360,202)}" alt="frame ${c.i+1}"><span class="ts-burn">${c.ts}</span></div>
+    <div class="meta">
+      <div class="vid">Video: ${c.vid}</div>
+      <div style="font-size:11px;color:var(--muted)">Timestamp: ${c.ts} · Frame: ${c.fid}</div>
+      ${Number.isFinite(c.fps)?`<div style="font-size:11px;color:var(--muted)" title="FPS lấy từ ${c.fpsSource||'metadata video'}${c.fpsSource==='map-keyframes'?'; thời gian chính xác của video VFR lấy từ PTS':''}">FPS: ${c.fps.toFixed(2)}${c.fpsSource==='map-keyframes'?' · danh định':''}</div>`:''}
+      <div class="sc"><span class="lab">${mode==="qa"?"Evidence":"Frame"} score</span><span class="num">${c.sc.toFixed(4)}</span></div>
+      <button class="btn-detail" onclick="openDetail('${mode==="qa"?"qa":"kis"}',${c.i})">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>Chi tiết</button>
+      ${c.video?`<a class="btn-detail vid-link" style="display:inline-flex;margin-top:7px;text-decoration:none" href="${c.video}" target="_blank" rel="noopener" title="Ctrl+G: mở video tại frame này">▶ Xem video tại frame (Ctrl+G)</a>`:''}
+    </div>
+  </div>`;
+}
+function galleryHTML(mode){
+  const list=S.cands[mode]||[];
+  if(!list.length) return `<div class="empty-hint">Chưa có kết quả. Nhập query và bấm Run để retrieval.</div>`;
+  // Frame đã chọn luôn lên đầu theo thứ tự tick. Chỉ số gốc không đổi, nên
+  // detail drawer và BTC CSV vẫn trỏ đúng candidate.
+  const selected=new Set(S.sel);
+  const ordered=[...S.sel.map(i=>list[i]).filter(Boolean), ...list.filter(c=>!selected.has(c.i))];
+  const rows=[]; for(let i=0;i<ordered.length;i+=3) rows.push(ordered.slice(i,i+3));
+  return chosenBar(list) + `<div class="gallery">${rows.map(r=>`
+    <div class="gal-row${S.sel.some(i=>r.includes(i))?' is-chosen':''}">${r.map(c=>candCard(c,mode)).join("")}</div>
+  `).join("")}</div>`;
+}
+function togglePick(i){
+  const k=S.sel.indexOf(i);
+  // Frame vừa chọn là frame người dùng đang quan sát: đưa lên Top 1 ngay.
+  if(k>=0)S.sel.splice(k,1); else S.sel.unshift(i);
+  renderResults();
+  renderManual();
+}
+function chosenBar(list){
+  const chosen=S.sel;
+  if(!chosen.length)return "";
+  const fmt=(ci)=>{const c=list[ci]; if(!c) return ""; if(S.mode==="trake")return `#${S.sel.indexOf(ci)+1} · ${c.vid}`; if(S.mode==="notebook")return `#${S.sel.indexOf(ci)+1} · ${c.vid} · score ${c.sc.toFixed(4)}`; return `#${S.sel.indexOf(ci)+1} · ${c.vid} · frame_id ${c.fid}`;};
+  return `<div class="chosen-bar">
+    <span class="cb-lab">Top selection</span>
+    <span class="cb-chips">${chosen.map(ci=>`<span class="cb-chip">${fmt(ci)}<span class="x" onclick="togglePick(${ci})">✕</span></span>`).join("")}</span>
+    <span class="cb-hint">tick to rank; #1 is your top pick</span>
+  </div>`;
+}
+
+/* ---- Manual verification when VLM / answer-extraction is OFF ---- */
+function fmtAnswer(a){
+  // Đáp án QA luôn được bọc trong dấu ngoặc kép (RFC 4180): trường answer đứng
+  // sau video_id,frame_id nên mỗi answer phải là 1 quoted field đầy đủ để BTC
+  // parse đúng dù có chứa dấu phẩy, dấu ngoặc kép hay newline.
+  return '"'+(a||"").replace(/"/g,'""')+'"';
+}
+function csvPreview(){
+  const list=S.cands[S.mode]||[];
+  const sel=S.sel;
+  if(!sel.length) return "— Chưa tick chọn frame nào (tick vào ô tròn trên góc ảnh để đưa frame đó vào danh sách nộp) —";
+  // Định dạng BTC chuẩn: KIS=video_id,frame_id | QA=video_id,frame_id,answer |
+  // TRAKE=video_id,fid1,fid2,…  (KHÔNG append cột "tên nộp" — tên nộp chính là
+  // trường answer đang nhập trong ô manual của QA, nằm sẵn ở cột cuối).
+  const rows=[];
+  if(S.mode==="kis"){
+    sel.forEach(i=>{const c=list[i]; if(c) rows.push(`${c.vid},${c.fid}`);});
+  }else if(S.mode==="qa"){
+    sel.forEach(i=>{const c=list[i]; if(c) rows.push(`${c.vid},${c.fid},${fmtAnswer(c.answer||"")}`);});
+  }else if(S.mode==="trake"){ // trake: one row per selected sequence → video_id,f1,f2,...,fN
+    sel.forEach(i=>{const c=list[i]; if(c){const ev=(c.evs||[]).map(e=>e.fid);rows.push([c.vid,...ev].join(","));}});
+  }else{ // notebook: video_id,score
+    sel.forEach(i=>{const c=list[i]; if(c) rows.push(`${c.vid},${c.sc.toFixed(4)}`);});
+  }
+  return rows.join("\n");
+}
+function manualPanel(){
+  if(S.mode==="qa"){
+    const vlmOn=document.getElementById("qaVlm")?.checked;
+    const list=S.cands.qa||[];
+    const chosen=S.sel;
+    // Chỉ hiện ô nhập đáp án cho các frame được user tick chọn
+    const rows = chosen.length ? `<div class="manual-rows">${chosen.map(i=>{const c=list[i]; if(!c)return ""; return `
+      <div class="manual-row">
+        <div class="mr-id"><span class="rank-tag">#${S.sel.indexOf(i)+1}</span>
+          <span class="mr-vid">${c.vid}</span><span class="mr-fid">f${c.fid}</span><span class="mr-ts">${c.ts}</span></div>
+        <input class="txt man-input" placeholder="ghi đáp án đọc được từ frame…" value="${c.answer||""}" oninput="setAnswer(${i},this.value)">
+      </div>`;}).join("")}</div>` : `<div style="font-size:12.5px;color:var(--ink-2);padding:6px 0;">Tick vào ô tròn trên góc các frame để chọn và nhập đáp án.</div>`;
+    return `<div class="manual">
+      <div class="manual-head">
+        <span class="mh-title">${vlmOn?'QA answer (VLM trích, có thể sửa)':'Manual verification'}</span>
+        <span class="mh-sub">${vlmOn?'Đáp án tự động trích từ evidence frame — tick để chọn, sửa nếu sai.':'Tick frame trên, rồi gõ đáp án bạn đọc được từ mỗi frame.'}</span>
+      </div>
+      ${rows}
+      ${exportBar("QA","video_id,frame_id,answer")}
+    </div>`;
+  }
+  if(S.mode==="trake"){
+    return `<div class="manual">
+      <div class="manual-head">
+        <span class="mh-title">TRAKE submission</span>
+        <span class="mh-sub">Each selected sequence exports one row of event frame ids.</span>
+      </div>
+      ${exportBar("TRAKE","video_id,frame_id_1,…,frame_id_N")}
+    </div>`;
+  }
+  if(S.mode==="notebook"){
+    const list=S.cands.notebook||[];
+    const chosen=S.sel;
+    const rows=chosen.length?`<div class="manual-rows">${chosen.map(i=>{const c=list[i];if(!c)return"";return `
+      <div class="manual-row">
+        <div class="mr-id"><span class="rank-tag">#${S.sel.indexOf(i)+1}</span>
+          <span class="mr-vid">${c.vid}</span><span class="mr-ts">score ${c.sc.toFixed(4)}</span></div>
+      </div>`;}).join("")}</div>`:`<div style="font-size:12.5px;color:var(--ink-2);padding:6px 0;">Tick vào ô tròn trên góc các video để chọn.</div>`;
+    return `<div class="manual">
+      <div class="manual-head">
+        <span class="mh-title">NOTEBOOK submission</span>
+        <span class="mh-sub">Each selected video exports video_id + score.</span>
+      </div>
+      ${rows}
+      ${exportBar("NOTEBOOK","video_id,score")}
+    </div>`;
+  }
+  return `<div class="manual">
+    <div class="manual-head">
+      <span class="mh-title">KIS submission</span>
+      <span class="mh-sub">Each selected frame exports video_id,frame_id.</span>
+    </div>
+    ${exportBar("KIS","video_id,frame_id")}
+  </div>`;
+}
+function exportBar(label,fmt){
+  const cnt = S.sel.length;
+  return `<div class="export-bar">
+    <span class="ex-lab">BTC CSV (${label})</span>
+    <span class="ex-fmt">${fmt}</span>
+    <input id="csvName" class="txt" style="width:170px;padding:4px 6px;font-size:11.5px" placeholder="tên file csv (vd minhhuy)" value="${S.csvName||""}" oninput="S.csvName=this.value">
+    <button class="btn-run" style="padding:6px 12px;font-size:11.5px" onclick="copyCSV()">Copy</button>
+    <button class="btn-run" style="padding:6px 12px;font-size:11.5px;background:var(--ink)" onclick="downloadCSV()">Download</button>
+    <span class="ex-count" style="font-size:11.5px;color:var(--accent);margin-left:8px">${cnt ? `(Đã chọn ${cnt} frame)` : '(Chưa chọn frame nào)'}</span>
+  </div>
+  <pre class="csv-preview">${csvPreview()}</pre>`;
+}
+function refreshCSV(){
+  const pv=document.querySelector(".csv-preview"); if(pv)pv.textContent=csvPreview()||"—";
+}
+function setAnswer(i,val){
+  const list=S.cands.qa||[]; if(list[i]){list[i].answer=val;
+    const pv=document.querySelector(".csv-preview"); if(pv)pv.textContent=csvPreview()||"—";
+    const sb=document.querySelector(".ex-count"); if(sb)sb.textContent="("+(S.sel.length?S.sel.length:1)+" row)";
+  }
+}
+function copyCSV(){
+  const txt=csvPreview();
+  if(navigator.clipboard){navigator.clipboard.writeText(txt).then(()=>{
+    const b=document.querySelector(".export-bar .btn-run"); if(b){const o=b.textContent;b.textContent="Copied ✓";setTimeout(()=>b.textContent=o,1200);}
+  });}
+}
+function downloadCSV(){
+  const txt=csvPreview();
+  const blob=new Blob([txt+"\n"],{type:"text/csv;charset=utf-8"});
+  const a=document.createElement("a");
+  const url=URL.createObjectURL(blob);
+  // Tên file: user đặt qua ô "csvName", fallback mặc định.
+  const name=(S.csvName||"").trim() || `query-live-${S.mode}`;
+  a.href=url; a.download=name.endsWith(".csv")?name:`${name}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+function parseEvents(t){
+  // Mirrors the backend's deterministic TRAKE parser closely enough that the
+  // UI preview shows action chains, not one giant sentence.  The backend still
+  // remains authoritative when executing the query.
+  return t.split(/\n+|;|\.|\b(?:then|next|after that|afterwards|later|followed by|finally|sau đó|rồi|tiếp theo|kế tiếp|cuối cùng)\b/gi)
+    .flatMap(s=>s.split(/,\s*(?=(?:exercise|touch|add|stir|shake|walk|run|sit|stand|enter|exit|open|close|eat|drink|cook|pour|cut|read|write|drive|ride|swim|dance|sing|play|lift|thêm|khuấy|lắc|đi|chạy|ngồi|đứng|vào|ra|mở|đóng|ăn|uống|nấu|đọc|viết|lái|bơi|nhảy|hát)\b)/i))
+    .map(s=>s.replace(/^E?\d+[:.\-)\s]+/i,"").trim()).filter(Boolean);
+}
+function imgUrl(path){
+  if(!path)return null;
+  const u=document.getElementById("backendUrl").value.trim().replace(/\/$/,"");
+  return `${u}/images?path=${encodeURIComponent(path)}`;
+}
+function videoUrl(videoId,frameId,timestamp){
+  if(!videoId)return null;
+  const u=document.getElementById("backendUrl").value.trim().replace(/\/$/,"");
+  const t=Number(timestamp);
+  const q=new URLSearchParams({frame_id:String(frameId||0)});
+  if(Number.isFinite(t)&&t>=0)q.set("timestamp",t.toFixed(2));
+  return `${u}/video-player/${encodeURIComponent(videoId)}?${q.toString()}`;
+}
+function displayTime(timestamp,frameId){
+  const t=Number(timestamp);
+  if(timestamp!==null&&timestamp!==undefined&&timestamp!==""&&Number.isFinite(t)&&t>=0){
+    const totalSeconds=Math.floor(t);
+    const mm=String(Math.floor(totalSeconds/60)).padStart(2,"0");
+    const ss=String(totalSeconds%60).padStart(2,"0");
+    return `${mm}:${ss}`;
+  }
+  return "Time unavailable";
+}
+function applyBackend(mode,cands){
+  if(!Array.isArray(cands))cands=[];
+  cands.sort((a,b)=>(b.score||0)-(a.score||0));
+  const u=document.getElementById("backendUrl").value.trim();
+  if(mode==="trake"){
+    const events=S.trakeEvents&&S.trakeEvents.length?S.trakeEvents:parseEvents(document.getElementById("queryInput").value);
+    S.cands.trake=cands.map((c,i)=>{
+      const evs=(c.event_frames||[]).map((fid,k)=>{
+        const base=c.score||0.9;
+        const sem=Math.max(0.4, base - k*0.02);
+        const tmp=Math.max(0.4, base - 0.01 - k*0.015);
+        const fin=Math.max(0.4, base - k*0.01);
+        const timestamp=(c.event_timestamps||[])[k];
+        return {n:k+1, ts:displayTime(timestamp,fid), timestamp, desc:events[k]||("event "+(k+1)), fid, sem, tmp, fin, seed:fid+1, img:imgUrl(c.keyframe_path), asr:[]};
+      });
+      const final=evs.length?evs.reduce((a,e)=>a+e.fin,0)/evs.length:(c.score||0);
+      return {i, vid:c.video_id, fps:c.fps, evs, final, alpha:0.010, duration:"—", img:imgUrl(c.keyframe_path), video:videoUrl(c.video_id,c.frame_id,c.timestamp)};
+    });
+    if(!S.cands.trake.length)S.cands.trake=genSeqs();
+  }else if(mode==="notebook"){
+    S.cands.notebook=cands.map((c,i)=>{
+      const events=(c.matched_events||[]).map((idx,j)=>({matched:true,ts:(c.evidence_timestamps||[])[j]||""}));
+      const totalEv=(c.matched_events||[]).length+(c.event_coverage!==undefined?Math.round((1-c.event_coverage)*5):0);
+      // Extract dense score from modality signals
+      const denseSig=(c.modality_signals||[]).find(s=>s.name==="dense");
+      const denseScore=denseSig?denseSig.normalised:0;
+      return {i, vid:c.video_id, sc:c.score||0,
+        coverage:c.event_coverage||0, temporal:c.temporal_consistency||0,
+        dense:denseScore,
+        evidence_count:c.evidence_count||0,
+        events:events.map((e,j)=>({matched:true,ts:e.ts})),
+        total_events:totalEv,
+        matched_events:(c.matched_events||[]).length,
+        timestamps:c.evidence_timestamps||[],
+        snippets:c.asr_snippets||[],
+        fid:c.frame_id||null,
+        eframe:c.keyframe_path||null,
+        ets:c.evidence_timestamp||null,
+        video:(c.frame_id!=null)?`${document.getElementById("backendUrl").value.trim()}/video-player/${encodeURIComponent(c.video_id)}?frame_id=${c.frame_id}`:(c.video_path?`${document.getElementById("backendUrl").value.trim()}/video-player/${encodeURIComponent(c.video_id)}`:null)
+      };
+    });
+  }else{
+    S.cands[mode]=cands.map((c,i)=>{
+      const fid=c.frame_id, vid=c.video_id;
+      const timestamp=c.timestamp;
+      return {i, vid, fid, fps:c.fps, fpsSource:c.fps_source, sc:c.score, ts:displayTime(timestamp,fid), timestamp, seed:(fid||i*7)+1, answer:c.answer||"", img:imgUrl(c.keyframe_path), video:videoUrl(vid,fid,timestamp), debug:c.debug||null};
+    });
+  }
+}
+function summaryCard(mode){
+  const list=S.cands[mode]||[];
+  const top=list[0];
+  if(mode==="qa"){
+    const ans=top&&(top.answer||"");
+    return `<div class="card">
+      <div class="card-head"><span class="vid">${top?top.vid:"—"}</span><span class="kind">QA · answer from top evidence</span>
+        <span class="spacer"></span><div class="score-big"><span class="lab">Top score</span>${top?top.sc.toFixed(2):"—"}</div></div>
+      <div class="card-body">
+        <div class="answer-box"><div class="a-lab">Answer</div><div class="a-val">${ans||"—"}</div></div>
+      </div>
+      <div class="metrics">
+        <div class="metric"><div class="m-lab">Answer</div><div class="m-val accent">${ans||"—"}</div></div>
+        <div class="metric"><div class="m-lab">Candidates</div><div class="m-val">${list.length}</div></div>
+        <div class="metric"><div class="m-lab">Top score</div><div class="m-val">${top?top.sc.toFixed(4):"—"}</div></div>
+        <div class="metric"><div class="m-lab">Selected</div><div class="m-val">${S.sel.length}</div></div>
+      </div></div>`;
+  }
+  return `<div class="card">
+    <div class="card-head"><span class="vid">${top?top.vid:"—"}</span><span class="kind">KIS · best frame + candidates</span>
+      <span class="spacer"></span><div class="score-big"><span class="lab">Top score</span>${top?top.sc.toFixed(3):"—"}</div></div>
+    <div class="metrics">
+      <div class="metric"><div class="m-lab">Top Score</div><div class="m-val accent">${top?top.sc.toFixed(3):"—"}</div></div>
+      <div class="metric"><div class="m-lab">Candidates</div><div class="m-val">${list.length}</div></div>
+      <div class="metric"><div class="m-lab">Selected</div><div class="m-val">${S.sel.length}</div></div>
+    </div></div>`;
+}
+
+function renderResults(){
+  const R=document.getElementById("results");
+  if(S.ui==="empty"){R.innerHTML=emptyState();return;}
+  if(S.ui==="loading"){
+    R.innerHTML=`<div class="result-meta">${statePill()}<span class="spacer"></span><span class="clk">retrieval in progress…</span></div>`+skeletonCard()+skeletonCard();
+    return;
+  }
+  if(S.ui==="error"){
+    const detail=S.fallback||"unknown error";
+    const isConn = /Failed to fetch|NetworkError|timeout/i.test(detail);
+    R.innerHTML=`<div class="result-meta">${statePill()}</div>`+
+      banner("error","✕","Backend lỗi",
+        (isConn
+          ? `Không kết nối được backend tại ${backendUrl.value||"http://127.0.0.1:8000"}. Hãy chạy \`aic2026 serve\` (hoặc restart shell serve để load code mới).`
+          : `Server trả lỗi: ${detail}. Nếu server cũ (bản trước refactor) hãy restart shell \`aic2026 serve\` để load code mới.`));
+    return;
+  }
+  if(S.ui==="none"){
+    R.innerHTML=`<div class="result-meta">${statePill()}</div>`+
+      banner("none","–","No matching evidence found.","No frame exceeded the similarity threshold (0.55). Try lowering it or rephrasing the query.");
+    return;
+  }
+  // success / low
+  let head=`<div class="result-meta">${statePill()}`;
+  if(S.ui==="low")head+=`<span class="clk">low confidence — verify before submitting</span>`;
+  else head+=`<span class="clk">${(S.cands[S.mode]||[]).length} candidates · ${new Date().toISOString().slice(11,19)}</span>`;
+  head+=`<span class="spacer"></span></div>`;
+  let body="";
+  if(S.ui==="low")body+=banner("low","▲","Potential match — low confidence","Best score 0.58 below the 0.70 review gate. Shown for inspection.");
+  if(S.fallback)body+=banner("error","⚠","Backend offline — no data",`${S.fallback}. Start it with \`aic2026 serve\` to use real retrieval.`);
+  if(S.mode==="kis"||S.mode==="qa"){body+=summaryCard(S.mode)+galleryHTML(S.mode);}
+  if(S.mode==="trake")body+=trakeGallery();
+  if(S.mode==="notebook")body+=notebookGallery();
+  R.innerHTML=head+body;
+}
+
+function renderManual(){
+  const slot=document.getElementById("manualSlot");
+  if(!slot)return;
+  // manualPanel() chứa cả ô nhập đáp án (QA) lẫn thanh xuất CSV (KIS/QA/TRAKE).
+  // Trước đây chỉ render cho QA nên KIS/TRAKE không có nút Copy/Download CSV —
+  // sửa thành render mọi mode miễn là có candidate.
+  if((S.cands[S.mode]||[]).length){ slot.innerHTML=manualPanel(); }
+  else slot.innerHTML="";
+}
+
+function render(){renderSidebar();renderQuery();renderResults();renderManual();}
+
+/* ===================== DRAWER ===================== */
+function openDetail(mode,seqI,evN){
+  const D=DATA[mode];
+  let title,sub,body;
+  if(mode==="kis"||mode==="qa"){
+    const list=S.cands[mode]||[];
+    const c=list[seqI];
+    if(!c){ closeDrawer(); return; }
+    title=`${mode.toUpperCase()} frame detail`;sub=`${c.vid} · ${c.ts} · score ${c.sc.toFixed(4)}`;
+    body=detailInner({
+      ts:c.ts, video:c.vid, videoUrl:c.video, desc: mode==="qa"?"Evidence frame used to extract the answer.":"Best matching keyframe for the query.",
+      sim:c.sc, tmp:Math.min(1,c.sc+0.03), asr: c.asr||[], seed:c.seed, debug:c.debug,
+      answer: mode==="qa"?c.answer:undefined, conf: mode==="qa"?c.conf:undefined
+    });
+  }else if(mode==="notebook"){
+    const list=S.cands.notebook||[];
+    const c=list[seqI];
+    if(!c){ closeDrawer(); return; }
+    title=`NOTEBOOK video detail`;sub=`${c.vid} · score ${c.sc.toFixed(4)}`;
+    body=detailInner({
+      ts:(c.timestamps||[])[0]||"", video:c.vid, videoUrl:c.video||"",
+      desc:`Coverage ${(c.coverage||0).toFixed(2)} · Temporal ${(c.temporal||0).toFixed(2)} · Dense ${(c.dense||0).toFixed(2)} · ${c.evidence_count||0} evidence segments`,
+      sim:c.sc, tmp:c.temporal||0, dense:c.dense||0,
+      asr:c.snippets||[], seed:null,
+      notebook:true, coverage:c.coverage, matched:c.matched_events, total:c.total_events,
+      events:c.events||[], timestamps:c.timestamps||[]
+    });
+  }else{
+    const seq=(S.cands.trake||[])[seqI];
+    if(!seq){ closeDrawer(); return; }
+    const e=seq.evs.find(x=>x.n===evN);
+    if(!e){ closeDrawer(); return; }
+    const vid=seq.vid;
+    title=`Seq ${seqI+1} · Event ${e.n} detail`;sub=`${vid} · ${e.ts}`;
+    body=detailInner({
+      ts:e.ts, video:vid, videoUrl:videoUrl(vid,e.fid,e.timestamp), desc:e.desc, sim:e.sem, tmp:e.tmp,
+      asr:e.asr, seed:e.seed, fin:e.fin
+    });
+  }
+  document.getElementById("dTitle").textContent=title;
+  document.getElementById("dSub").textContent=sub;
+  document.getElementById("drawerBody").innerHTML=body;
+  document.getElementById("overlay").classList.add("open");
+}
+function detailInner(o){
+  const isNb=o.notebook;
+  const dbg=o.debug||{};
+  const models=isNb?[
+    {n:"ASR BM25",v:o.sim},
+    {n:"Dense BGE-M3",v:o.dense||0},
+    {n:"Event coverage",v:o.coverage||0},
+    {n:"Temporal consistency",v:o.tmp||0},
+    {n:"Modality fusion",v:(o.sim+(o.dense||0)+(o.coverage||0)+(o.tmp||0))/4}
+  ]:dbg.rrf_raw!==undefined?[
+    {n:"RRF raw (vector+BM25)",v:dbg.rrf_raw},
+    {n:"Semantic normalized",v:dbg.semantic_norm},
+    {n:"Object coverage",v:dbg.object_coverage},
+    {n:"Final score",v:o.sim}
+  ]:[
+    {n:"SigLIP2 text↔frame",v:o.sim},
+    {n:"BM25 lexical",v:Math.max(0.3,o.sim-0.18)},
+    {n:"ASR align",v:o.tmp*0.88}
+  ];
+  const frameImg=o.seed?`<div class="frame"><img src="${frameURI(o.seed,640,360)}" alt="frame"><span class="ts-burn">${o.ts}</span></div>`:'';
+  const eventSection=isNb?`
+    <div class="d-section">
+      <div class="ds-h">Evidence</div>
+      <div style="font-size:12.5px;color:var(--ink-2);line-height:1.5">${o.desc}</div>
+      ${o.matched!==undefined?`<div style="font-size:12px;color:var(--ink-2);margin-top:6px">Matched events: <b>${o.matched}</b>/${o.total}</div>`:''}
+      ${o.timestamps&&o.timestamps.length?`<div style="margin-top:8px"><div style="font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Timestamps</div><div style="display:flex;flex-wrap:wrap;gap:4px">${o.timestamps.map(t=>`<span class="sc">${t}</span>`).join("")}</div></div>`:''}
+    </div>`:`
+    <div class="d-section">
+      <div class="ds-h">Event</div>
+      <div style="font-size:12.5px;color:var(--ink-2);line-height:1.5">${o.desc}</div>
+    </div>`;
+  return `
+    ${frameImg}
+    ${eventSection}
+    <div class="d-section">
+      <div class="ds-h">Scores</div>
+      <div class="d-grid">
+        <div class="d-cell"><div class="c-l">${isNb?'Score':'Similarity'}</div><div class="c-v accent">${Number(o.sim).toFixed(4)}</div></div>
+        <div class="d-cell"><div class="c-l">Temporal</div><div class="c-v">${Number(o.tmp).toFixed(4)}</div></div>
+        ${isNb&&o.coverage!==undefined?`<div class="d-cell"><div class="c-l">Coverage</div><div class="c-v accent">${Number(o.coverage).toFixed(4)}</div></div>`:''}
+        ${o.fin!==undefined?`<div class="d-cell"><div class="c-l">Final</div><div class="c-v accent">${o.fin.toFixed(4)}</div></div>`:''}
+        ${o.conf!==undefined?`<div class="d-cell"><div class="c-l">Confidence</div><div class="c-v">${o.conf.toFixed(2)}</div></div>`:''}
+        ${o.ts?`<div class="d-cell"><div class="c-l">Timestamp</div><div class="c-v">${o.ts}</div></div>`:''}
+        <div class="d-cell"><div class="c-l">Video</div><div class="c-v">${o.video}</div></div>
+      </div>
+    </div>
+    ${o.videoUrl?`<a class="btn-run" style="text-decoration:none;margin:0 0 14px" href="${o.videoUrl}" target="_blank" rel="noopener">▶ Mở video tại frame này</a>`:''}
+    ${o.answer?`<div class="d-section"><div class="ds-h">Extracted answer</div>
+      <div class="answer-box"><div class="a-val">${o.answer}</div></div></div>`:''}
+    <div class="d-section">
+      <div class="ds-h">Matched signals</div>
+      <div class="d-tags">
+        ${(o.asr||[]).map(t=>`<span class="d-tag asr">ASR · ${t}</span>`).join("")}
+        ${(!o.asr||!o.asr.length)?'<span class="d-tag">no ASR</span>':''}
+      </div>
+    </div>
+    <div class="d-section">
+      <div class="ds-h">${isNb?'Scoring breakdown':'Model contributions'}</div>
+      ${models.map(m=>`<div class="model-row"><span class="mr-name">${m.n}</span>
+        <span class="mr-track"><i style="width:${Math.round(m.v*100)}%"></i></span>
+        <span class="mr-val">${m.v.toFixed(2)}</span></div>`).join("")}
+    </div>
+  `;
+}
+function closeDrawer(){document.getElementById("overlay").classList.remove("open");}
+document.getElementById("closeDrawer").onclick=()=>document.getElementById("overlay").classList.remove("open");
+document.getElementById("overlay").onclick=e=>{if(e.target.id==="overlay")document.getElementById("overlay").classList.remove("open")};
+
+/* ===================== EVENTS ===================== */
+document.getElementById("modeList").addEventListener("click",e=>{
+  const m=e.target.closest(".mode");if(!m)return;
+  S.mode=m.dataset.mode;S.ui="success";S.sel=[];S.cands={};syncChips();render();
+});
+document.addEventListener("change",e=>{
+  if(e.target.id==="qaVlm"){ if(S.mode==="qa"){renderResults();renderManual();} }
+  // Toggle ASR → hiện/ẩn ô query tiếng Việt (khớp transcript ASR).
+  if(e.target.matches('input[type=checkbox][data-cfg="asr"]')){ updateAsrQueryVisibility(); }
+});
+document.getElementById("stateChips").addEventListener("click",e=>{
+  const c=e.target.closest(".chip");if(!c)return;
+  S.ui=c.dataset.state;syncChips();renderResults();
+});
+function syncChips(){
+  document.querySelectorAll("#stateChips .chip").forEach(c=>c.classList.toggle("on",c.dataset.state===S.ui));
+}
+document.getElementById("runBtn").onclick=runQuery;
+
+// Đọc các control trong panel #config (CONFIG[mode]()) → ánh xạ sang RuntimeConfig
+// của backend. Không control nào bị bỏ qua: mỗi toggle/slider/select đều gửi đúng
+// trường tương ứng. OCR là bước ingest (offline) nên toggle bị disable + no-op.
+function readConfig(){
+  const root=document.getElementById("config");
+  const cfg={asr:false, visual:false, vlm:false,
+             fusion_adaptive:false, temporal_rerank:false,
+             similarity_threshold:null, model:"SigLIP2-base",
+             return_count:0, coarse_top_k:200};
+  const nums=root.querySelectorAll(".row2 input.txt");
+  if(nums[0]) cfg.return_count=parseInt(nums[0].value||"0")||0;
+  if(nums[1]) cfg.coarse_top_k=parseInt(nums[1].value||"200")||200;
+  const range=root.querySelector('input[type=range]');
+  cfg.similarity_threshold = range ? parseFloat(range.value) : null;
+  const sel=root.querySelector('select.sel');
+  if(sel) cfg.model=sel.value;
+  root.querySelectorAll('input[type=checkbox][data-cfg]').forEach(t=>{ cfg[t.dataset.cfg]=t.checked; });
+  return cfg;
+}
+
+async function runQuery(){
+  const q=document.getElementById("queryInput").value.trim();
+  if(!q){document.getElementById("queryInput").focus();return;}
+  const backend=document.getElementById("backendUrl").value.trim().replace(/\/$/,"");
+  S.sel=[];S.cands={};S.fallback=null;
+  if(S.mode==="trake")S.trakeEvents=parseEvents(q);
+  const cfg=readConfig();
+  // Ánh xạ control → RuntimeConfig backend.
+  //  - model "SigLIP2-base" bật SigLIP2 query-side reranker (Hướng A).
+  //  - ASR toggle gửi đường dẫn sidecar (index tự build BM25 từ transcript).
+  //  - visual (QA) = verify evidence → use_constraint_verification.
+  //  - similarity_threshold + return_count áp dụng filter/truncate ở backend.
+  const runtime={
+    // null → backend solve theo _SERVER_INDEX_DEFAULTS (trùng với eager-load lúc
+    // startup) → cache hit, không load lại model. Ghi đè path ở đây nếu cần index khác.
+    manifest_path:null,
+    features_path:null,
+    embedding_backend: "siglip2",
+    siglip2_model: "google/siglip2-base-patch16-224",
+    // SigLIP2 text encoder supports multilingual — no translation needed.
+    translate_query: false,
+    coarse_top_k:cfg.coarse_top_k,
+    return_count:cfg.return_count,
+    similarity_threshold:cfg.similarity_threshold,
+    model_clip:"SigLIP2-base",
+    asr_sidecar_path: cfg.asr ? "data/processed/asr_sidecar.jsonl" : null,
+    asr_dense_path: cfg.asr ? "data/processed/asr_dense.npy" : null,
+    use_blip2_rerank: false,
+    use_constraint_verification: !!cfg.visual,
+    fusion_mode: cfg.fusion_adaptive ? "rrf_adaptive" : "rrf_baseline",
+    use_temporal_rerank: true,
+    use_trake_final_gating: !!cfg.trake_gating,
+    use_query_planner: !!cfg.planner,
+    use_event_coverage: !!cfg.event_coverage,
+    use_moment_rerank: true,
+    event_coverage_blend: cfg.event_blend || 0.5,
+    late_interaction_weight: cfg.late_interaction ? 0.3 : 0.0,
+    video_dedupe_window: cfg.dedupe_window ? 1.5 : 0.0,
+  };
+  // Query tiếng Việt cho ASR scoring (nếu user nhập) — giải quyết query EN vô dụng
+  // với transcript VI. Để trống = backend dùng query chính cho cả ASR.
+  const asrQ=document.getElementById("asrQuery");
+  if(asrQ && asrQ.value.trim()) runtime.asr_query=asrQ.value.trim();
+  let payload={query_id:"live", text:q, question:q, events:S.trakeEvents||[], runtime};
+  if(S.mode==="notebook"){
+    const nbTopN=document.getElementById("nbTopN");
+    const nbModel=document.getElementById("nbModel");
+    payload={
+      query_id:"live-notebook",
+      text:q,
+      asr_query:(asrQ&&asrQ.value.trim())||q,
+      top_n:nbTopN?parseInt(nbTopN.value)||5:5,
+      llm_model:nbModel?nbModel.value:"qwen2.5:1.5b",
+      ollama_url:"http://127.0.0.1:11434",
+      use_visual:!!cfg.nb_visual,
+      embedding_backend:"siglip2",
+      siglip2_model:"google/siglip2-base-patch16-224"
+    };
+  }
+  // QA: Answer extraction ON (qaVlm checked) → /run (VLM trích đáp án).
+  //     OFF → /candidates (chỉ retrieval, user tự điền đáp án).
+  // NOTEBOOK: different endpoint and payload.
+  let endpoint=`${backend}/tasks/${S.mode}/run`;
+  if(S.mode==="qa" && !cfg.vlm) endpoint=`${backend}/tasks/qa/candidates`;
+  if(S.mode==="notebook") endpoint=`${backend}/tasks/notebook/run`;
+  S.ui="loading";syncChips();renderResults();renderManual();
+  try{
+    const ctrl=new AbortController();
+    // Lần đầu query phải load model (SigLIP2 ~300MB + index 177k) — có thể mất
+    // vài chục giây nếu máy đang bận. Cho timeout 180s để không abort.
+    const to=setTimeout(()=>ctrl.abort(),180000);
+    const res=await fetch(endpoint,{
+      method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),signal:ctrl.signal
+    });
+    clearTimeout(to);
+    if(!res.ok)throw new Error("HTTP "+res.status+" from backend");
+    const data=await res.json();
+    applyBackend(S.mode,data.candidates||[]);
+    S.ui="success";syncChips();renderResults();renderManual();
+  }catch(err){
+    // Backend unreachable / query crashed — hiện empty state rõ ràng, không sinh demo.
+    S.cands[S.mode]=[];
+    S.fallback=err.message||"backend error";
+    S.ui="error";syncChips();renderResults();renderManual();
+  }
+}
+document.getElementById("queryInput").addEventListener("keydown",e=>{
+  if(e.key==="Enter"&&!(e.metaKey||e.ctrlKey)){
+    e.preventDefault(); runQuery();
+  }
+});
+document.getElementById("queryInput").addEventListener("keydown",e=>{
+  if((e.metaKey||e.ctrlKey)&&e.key==="Enter"){e.preventDefault();runQuery();}
+});
+document.getElementById("themeBtn").onclick=()=>{
+  const r=document.documentElement;
+  const cur=r.getAttribute("data-theme");
+  r.setAttribute("data-theme",cur==="dark"?"light":"dark");
+};
+
+/* ===================== Ctrl+G: mở video tại frame đang focus ===================== */
+// Card được focus = phần tử .cand có :focus (click/tab) hoặc card cuối cùng được
+// click. Khi bấm Ctrl+G, resolve timestamp chính xác từ BTC map (/video-time)
+// rồi mở /video-player nhảy đến frame đó.
+let _lastFocusedCard=null;
+function focusedCard(){
+  const active=document.activeElement;
+  if(active&&active.classList&&active.classList.contains("cand"))return active;
+  if(_lastFocusedCard&&document.body.contains(_lastFocusedCard))return _lastFocusedCard;
+  return null;
+}
+function openVideoAtFrame(card){
+  if(!card)return;
+  const vid=card.getAttribute("data-vid");
+  const fid=parseInt(card.getAttribute("data-fid")||"0",10);
+  if(!vid)return;
+  const u=document.getElementById("backendUrl").value.trim().replace(/\/$/,"");
+  const open=(ts)=>{
+    const q=new URLSearchParams({frame_id:String(fid||0)});
+    if(Number.isFinite(ts)&&ts!=null&&ts>=0)q.set("timestamp",Number(ts).toFixed(2));
+    const url=`${u}/video-player/${encodeURIComponent(vid)}?${q.toString()}`;
+    window.open(url,"_blank", "noopener");
+  };
+  // Hỏi backend lấy timestamp chính xác từ map keyframe (fallback: link cũ).
+  fetch(`${u}/video-time/${encodeURIComponent(vid)}?frame_id=${fid}`)
+    .then(r=>r.ok?r.json():null)
+    .then(d=>{ open(d&&Number.isFinite(d.timestamp)?d.timestamp:undefined); })
+    .catch(()=>{ open(undefined); });
+}
+document.addEventListener("keydown",e=>{
+  if((e.ctrlKey||e.metaKey)&&(e.key==="g"||e.key==="G")){
+    const card=focusedCard();
+    if(card){ e.preventDefault(); openVideoAtFrame(card); }
+  }
+});
+// Ghi nhớ card được click để Ctrl+G hoạt động ngay cả khi focus chưa vào card.
+document.addEventListener("click",e=>{
+  const card=e.target.closest&&e.target.closest(".cand");
+  if(card)_lastFocusedCard=card;
+},true);
+
+
+/* Khi nhúng vào Streamlit (iframe), tự động co giãn chiều cao khung cho vừa
+   nội dung. window.parent.Streamlit chỉ tồn tại trong component của Streamlit,
+   nên bọc trong guard để mở file độc lập (file://) vẫn chạy bình thường. */
+function syncFrameHeight(){
+  try{ if(window.parent&&window.parent.Streamlit) window.parent.Streamlit.setFrameHeight(); }catch(_){}
+}
+if(window.parent&&window.parent.Streamlit){
+  window.addEventListener("load",syncFrameHeight);
+  window.addEventListener("resize",syncFrameHeight);
+  // quan sát thay đổi nội dung (kết quả, drawer…) để cập nhật chiều cao
+  const _mo=new MutationObserver(syncFrameHeight);
+  _mo.observe(document.body,{childList:true,subtree:true,attributes:true});
+  syncFrameHeight();
+}
+
+render();
+</script>
+</body>
+</html>

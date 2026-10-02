@@ -1,19 +1,37 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
+import pytest
 
 from aic2026.models import FrameRecord
 from aic2026.retrieval import RetrievalPipeline
 from aic2026.retrieval.index import VectorIndex
 
+_DERIVED_FEATS = Path("data/processed/derived_features.npy")
+_DERIVED_MANIFEST = Path("data/processed/derived_manifest.jsonl")
+
 
 def _load_derived() -> tuple[np.ndarray, list[FrameRecord]]:
-    feats = np.load("data/processed/derived_features.npy")
+    """Load the derived L21_V001 feature matrix + manifest.
+
+    These artifacts are produced by `aic2026 prepare` and are NOT committed to
+    the repo (the .npy is ~hundreds of MB).  When they are absent the test is
+    skipped rather than failed — this is an environment/data issue, not a code
+    regression. Run `aic2026 prepare` (see RUNNING.md) to generate them.
+    """
+    if not _DERIVED_FEATS.exists() or not _DERIVED_MANIFEST.exists():
+        pytest.skip(
+            "derived artifacts not found — run `aic2026 prepare` first "
+            "(see RUNNING.md). Missing: %s / %s"
+            % (_DERIVED_FEATS, _DERIVED_MANIFEST)
+        )
+    feats = np.load(_DERIVED_FEATS)
     recs = [
         FrameRecord(**json.loads(line))
-        for line in open("data/processed/derived_manifest.jsonl", encoding="utf-8")
+        for line in _DERIVED_MANIFEST.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
     return feats, recs

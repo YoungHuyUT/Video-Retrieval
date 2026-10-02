@@ -3,16 +3,25 @@ from .color import (
     colour_fraction,
     contrastive_clip_colour_rerank,
     query_colours,
-    rerank_with_colour_evidence,
 )
 from .lexical import (
     RRF_K,
+    minmax_normalize,
     normalize_scores,
     object_evidence_adjustment,
     rerank_with_metadata,
     rerank_with_object_evidence,
     rrf_fuse,
     rrf_rank,
+    adaptive_modality_fusion,
+    gate_lion_dance_split,
+)
+
+from .gemini_reranker import (
+    CircuitBreaker,
+    GeminiFlashLiteProvider,
+    GeminiGate,
+    GeminiReranker,
 )
 
 __all__ = [
@@ -21,12 +30,18 @@ __all__ = [
     "contrastive_clip_colour_rerank",
     "facet_queries",
     "late_interaction_rerank",
+    "minmax_normalize",
     "normalize_scores",
     "object_evidence_adjustment",
     "rerank_with_metadata",
     "rerank_with_object_evidence",
-    "rerank_with_colour_evidence",
     "query_colours",
     "rrf_fuse",
     "rrf_rank",
+    "adaptive_modality_fusion",
+    "gate_lion_dance_split",
+    "GeminiReranker",
+    "GeminiFlashLiteProvider",
+    "GeminiGate",
+    "CircuitBreaker",
 ]

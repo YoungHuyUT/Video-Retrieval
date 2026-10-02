@@ -1,13 +1,65 @@
+# --- Python / tooling ---
 .venv/
+venv/
 __pycache__/
 .pytest_cache/
+.ruff_cache/
+.uv-cache/
 *.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+_git_status.txt
+_gs2.txt
+
+# --- Secrets / local env ---
+.env
+.env.local
+*.pem
+*.key
+
+# --- Model caches / derived data (KHÔNG push lên GitHub) ---
 data/raw/
 data/downloads/
-data/processed/*.jsonl
-data/processed/clip_features/*.npz
-data/processed/*.npy
+data/asr/
+data/aic26-b2-clip-features/
 data/indexes/*
 !data/indexes/.gitkeep
+# Toàn bộ processed là cache/manifest sinh từ video — chỉ giữ .gitkeep
+data/processed/*
+!data/processed/.gitkeep
 outputs/
+results/
+*.npy
+*.npz
+*.faiss
+*.onnx
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+
+# --- Logs / temp ---
+*.log
+*.err
 *.bak.*
+server.err
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Video / media ---
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.webm
+
+# --- Bench / verify scripts local ---
+bench*.py
+_verify.py
+RUNNING.md
+check_status.txt

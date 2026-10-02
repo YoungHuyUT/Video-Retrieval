@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import csv
+import re
 import json
 import logging
 from dataclasses import dataclass
@@ -23,12 +24,29 @@ from .manifest import (
 logger = logging.getLogger(__name__)
 
 
-def _load_keyframe_frame_ids(map_root: Path | None, video_id: str) -> list[int] | None:
-    """Đọc CSV map-keyframes → list frame_idx (frame thật của video) theo thứ tự ordinal.
+def _is_vfr_video(video_id: str) -> bool:
+    """N001–N100 là camera giao thông VFR — frame_idx không đáng tin."""
+    v = video_id.upper()
+    if not v.startswith("N"):
+        return False
+    # Extract digits after N (e.g. N001-V001 -> 001, N042 -> 042)
+    m = re.match(r"N(\d+)", v)
+    if not m:
+        return False
+    num = int(m.group(1))
+    return 1 <= num <= 100
 
-    CSV có cột: n, pts_time, fps, frame_idx. `frame_idx` = frame index gốc trong video,
-    thứ tự hàng = ordinal keyframe (1-based). Đây là nguồn đáng tin cậy hơn metadata
-    JSON (metadata BTC không có frame_indices). Trả về None nếu file CSV không có.
+
+def _load_keyframe_frame_ids(map_root: Path | None, video_id: str) -> list[int] | None:
+    """Đọc CSV map-keyframes → list frame_id theo thứ tự ordinal.
+
+    CSV có cột: n, pts_time, fps, frame_idx.
+
+    * **CFR** (S01, M01–M10, …): trả ``frame_idx`` (frame gốc trong video).
+    * **VFR** (N001–N100): trả ``round(pts_time × 1000)`` (milisecond) — vì
+      frame_idx chỉ mang tính tương đối, BTC cho phép dùng ms thay thế.
+
+    Trả về None nếu file CSV không có.
     """
     if map_root is None:
         return None
@@ -36,9 +54,14 @@ def _load_keyframe_frame_ids(map_root: Path | None, video_id: str) -> list[int] 
     if not csv_path.exists():
         return None
     try:
+        vfr = _is_vfr_video(video_id)
         with csv_path.open(encoding="utf-8") as fh:
             reader = csv.DictReader(fh)
-            return [int(r["frame_idx"]) for r in reader if r.get("frame_idx")]
+            if vfr:
+                # VFR: dùng pts_time × 1000 (ms) thay vì frame_idx
+                return [round(float(r["pts_time"]) * 1000) for r in reader]
+            else:
+                return [int(r["frame_idx"]) for r in reader if r.get("frame_idx")]
     except (OSError, ValueError, KeyError):
         return None
 
@@ -71,6 +94,11 @@ def _load_object_labels(object_path: Path | None) -> list[str]:
         data = json.loads(object_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
+    return _object_labels_from_data(data)
+
+
+def _object_labels_from_data(data: object) -> list[str]:
+    """Extract confident detector labels from an already-decoded object JSON."""
     if not isinstance(data, dict):
         return []
     entities = data.get("detection_class_entities") or []
@@ -374,7 +402,7 @@ def build_official_index(
                     # object_labels only — video-level text moved to video_metadata.jsonl
                     # (see _emit_video_metadata below) to avoid per-frame duplication.
                     object_labels=[label for label in labels if label],
-                    object_path=object_path,
+                    object_path=str(object_path) if object_path is not None else None,
                     metadata_path=vmeta.metadata_path,
                 )
                 mf.write(rec.model_dump_json() + "\n")

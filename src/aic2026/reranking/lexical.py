@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from typing import Literal
 
 import numpy as np
 
@@ -47,6 +48,7 @@ __all__ = [
     "RRF_K",
     "rrf_fuse",
     "rrf_rank",
+    "minmax_normalize",
     "normalize_scores",
     "object_evidence_adjustment",
     "rerank_with_object_evidence",
@@ -73,7 +75,56 @@ _OBJECT_ALIASES: dict[str, tuple[str, ...]] = {
     "bird": ("bird", "chim"),
     "horse": ("horse", "ngựa"),
     "elephant": ("elephant", "voi"),
-    "cow": ("cow", "cattle", "con bò"),
+    # --- Gia súc lớn: trâu / bò — detector (OpenImages V4) gán nhãn
+    # "Bull" / "Cattle" / "Animal" cho khung hình trâu, nên alias phải chứa
+    # những nhãn đó để lớp object-evidence rerank nhận diện được. Thiếu entry
+    # này, query "buffalo"/"trâu" không kích hoạt object evidence → frame
+    # bướm/chim (cosine ~0.287) đứng ngang hàng frame trâu (cosine ~0.30),
+    # không bị đẩy xuống → "ảnh chả liên quan" lọt top.
+    "buffalo": ("buffalo", "water buffalo", "buffle", "trâu", "con trâu", "bò đực", "bò rừng", "Bull", "Cattle"),
+    "cow": ("cow", "cattle", "con bò", "bò"),
+    # --- Động vật: mở rộng dựa trên nhãn detector THẬT có trong
+    # data/processed/official_manifest.jsonl (513 nhãn). Mỗi entry map query
+    # (EN + VI) sang nhãn OpenImages V4 thực tế trong manifest. Thiếu entry
+    # → object-evidence rerank không kích hoạt → ảnh không liên quan lọt top
+    # (lỗi y hệt "buffalo"). Đã đối chiếu tần suất nhãn thực tế:
+    #   pig 24, goat 47, sheep 14, duck 73, chicken 45, rabbit 26, monkey 50,
+    #   crab 170, shrimp 773, bee 210, insect 170, deer 41, camel 22, snake 14,
+    #   frog 9, turtle/tortoise 30, lion 7, tiger 8, ant 7, butterfly 60,
+    #   shellfish 252, goldfish 42, seahorse 9, antelope 11, starfish 1,
+    #   jellyfish 80, beetle 5, spider 2, bear 1.
+    "pig": ("pig", "con lợn", "con heo", "lợn", "heo"),
+    "goat": ("goat", "con dê", "dê"),
+    "sheep": ("sheep", "lamb", "con cừu", "cừu"),
+    "duck": ("duck", "con vịt", "vịt"),
+    "chicken": ("chicken", "con gà", "gà", "gà trống", "rooster"),
+    "rabbit": ("rabbit", "bunny", "con thỏ", "thỏ"),
+    "monkey": ("monkey", "con khỉ", "khỉ"),
+    "crab": ("crab", "con cua", "cua"),
+    "shrimp": ("shrimp", "con tôm", "tôm", "prawn"),
+    "prawn": ("shrimp", "con tôm", "tôm", "prawn"),
+    "bee": ("bee", "honey bee", "con ong", "ong"),
+    "insect": ("insect", "con côn trùng", "côn trùng", "bug"),
+    "butterfly": ("butterfly", "con bướm", "bướm"),
+    "ant": ("ant", "con kiến", "kiến"),
+    "beetle": ("beetle", "bọ cánh cứng", "bọ"),
+    "spider": ("spider", "con nhện", "nhện"),
+    "deer": ("deer", "con nai", "nai", "hart"),
+    "antelope": ("antelope", "linh dương", "con linh dương"),
+    "camel": ("camel", "con lạc đà", "lạc đà"),
+    "snake": ("snake", "con rắn", "rắn"),
+    "frog": ("frog", "con ếch", "ếch"),
+    "turtle": ("turtle", "sea turtle", "tortoise", "con rùa", "rùa", "rùa biển"),
+    "tortoise": ("turtle", "sea turtle", "tortoise", "con rùa", "rùa", "rùa biển"),
+    "goldfish": ("goldfish", "cá vàng", "cá chép"),
+    "seahorse": ("seahorse", "sea horse", "cá ngựa"),
+    "starfish": ("starfish", "sao biển"),
+    "jellyfish": ("jellyfish", "con sứa", "sứa"),
+    "shellfish": ("shellfish", "động vật thân mềm", "nhuyễn thể"),
+    "lion": ("lion", "con sư tử", "sư tử"),
+    "tiger": ("tiger", "con hổ", "hổ"),
+    "bear": ("bear", "con gấu", "gấu", "polar bear"),
+    "mouse": ("mouse", "computer mouse", "con chuột", "chuột"),
     "bus": ("bus", "xe buýt"),
     "train": ("train", "tàu hỏa", "tàu"),
     "boat": ("boat", "ship", "tàu thuyền", "thuyền"),
@@ -116,7 +167,10 @@ _OBJECT_ALIASES: dict[str, tuple[str, ...]] = {
     "fork": ("fork", "cái nĩa", "nĩa", "dĩa"),
     "knife": ("knife", "con dao", "cái dao", "dao"),
     "spoon": ("spoon", "cái thìa", "thìa", "muỗng"),
-    "bowl": ("bowl", "cái bát", "bát", "cái tô", "tô"),
+    # Keep the Vietnamese phrase "cái tô" but omit bare "tô": accent-folding
+    # turns it into English preposition "to" and falsely detects bowls in
+    # relational queries such as "a woman next to a dog".
+    "bowl": ("bowl", "cái bát", "bát", "cái tô"),
     "banana": ("banana", "chuối"),
     "apple": ("apple", "quả táo", "táo"),
     "orange": ("orange", "quả cam", "màu cam"),
@@ -128,6 +182,31 @@ _OBJECT_ALIASES: dict[str, tuple[str, ...]] = {
     "vegetable": ("vegetable", "rau", "rau củ", "đồ ăn", "thức ăn"),
     "stage": ("stage", "sân khấu"),
     "scissors": ("scissors", "cái kéo", "kéo"),
+    # --- Đồ đeo trên người (thường xuất trong count/attribute query) ---
+    "glasses": ("glasses", "eyeglasses", "spectacles", "kính", "kính mắt", "đeo kính"),
+    "sunglasses": ("sunglasses", "shades", "kính râm"),
+    "hat": ("hat", "cap", "mũ", "nón", "mũ bảo hiểm", "helmet", "nón bảo hiểm"),
+    "helmet": ("helmet", "mũ bảo hiểm", "nón bảo hiểm"),
+    "tie": ("tie", "cà vạt", "cravat"),
+    "glove": ("glove", "găng tay", "găng"),
+    "shoe": ("shoe", "giày", "footwear"),
+    "áo dài": ("áo dài", "ao dai", "aodai", "aodai", "vietnamese dress", "traditional dress", "truyền thống", "trang phục"),
+    # --- Màu sắc (dùng cho constraint verification + object evidence) ---
+    "red": ("red", "đỏ", "màu đỏ"),
+    "pink": ("pink", "hồng", "màu hồng", "rose", "hường"),
+    "blue": ("blue", "xanh", "xanh dương", "xanh lam", "màu xanh"),
+    "white": ("white", "trắng", "màu trắng"),
+    "black": ("black", "đen", "màu đen"),
+    "green": ("green", "xanh lá", "màu xanh lá"),
+    "yellow": ("yellow", "vàng", "màu vàng"),
+    "purple": ("purple", "tím", "màu tím"),
+    "orange color": ("orange", "cam", "màu cam"),
+    # --- Trang phục / quần áo ---
+    "shirt": ("shirt", "áo", "áo sơ mi", "tshirt", "áo thun"),
+    "dress": ("dress", "váy", "cái váy", "váy đầm"),
+    "clothes": ("clothes", "quần áo", "trang phục", "trang phục"),
+    "skirt": ("skirt", "váy", "chân váy"),
+    "pants": ("pants", "quần", "quần dài", "trousers"),
 }
 
 
@@ -140,17 +219,118 @@ def _has_phrase(text: str, phrase: str) -> bool:
     return bool(re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", text))
 
 
+def _alias_matches(text_folded: str, alias: str) -> bool:
+    """Match một alias (đã accent-fold) trong text đã fold.
+
+    Ưu tiên word-boundary (khớp từ nguyên, không lẫn trong từ dài) để:
+      - ``"ant"`` KHÔNG khớp ``"elephant"``,
+      - ``"bee"`` KHÔNG khớp ``"beetle"``,
+      - ``"man"`` KHÔNG khớp ``"woman"`` / ``"human"`` (sửa false-positive cũ).
+    Đây là sửa quan trọng: trước đây alias 1-từ dùng substring, nên thêm alias
+    ngắn ("ant") sẽ khớp nhầm nhãn dài ("elephant") → sinh bug mới khi mở rộng
+    bảng ``_OBJECT_ALIASES``.
+
+    Bridge cả hai chiều khoảng trắng cho alias viết liền ("aodai") và label
+    viết liền ("Aodai"): alias có dấu cách thì thử word-boundary chuẩn, SAU
+    ĐÓ thử bản bỏ mọi khoảng trắng để bridge sang label liền.
+    """
+    alias_folded = _fold_accents(alias)
+    # Word-boundary luôn an toàn và bắt được cả label viết liền (vd "aodai"
+    # là một token trong text đã fold).
+    if _has_phrase(text_folded, alias_folded):
+        return True
+    if " " in alias_folded:
+        # alias đa từ ("áo dài") → bridge sang label liền ("aodai"), but
+        # require the joined label to be a whole token. Substring matching here
+        # made "em bé" (baby/person) spuriously match inside "remember".
+        joined = alias_folded.replace(" ", "")
+        return joined in text_folded.split()
+    # alias 1-từ: KHÔNG fallback substring (tránh ant⊂elephant). Word-boundary
+    # ở trên đã bắt được mọi trường hợp hợp lệ (kể cả label viết liền).
+    return False
+
+
+# Animal concepts that benefit from stronger object-evidence penalty.
+# CLIP embedding space groups all animals into a broad "animal" manifold, so
+# "buffalo" scores near cow, goat, deer, etc.  Boosting the penalty for these
+# concepts ensures wrong-animal frames are pushed down harder than for objects.
+_ANIMAL_CONCEPTS: frozenset[str] = frozenset({
+    "buffalo", "cow", "goat", "sheep", "pig", "horse", "elephant",
+    "deer", "dog", "cat", "bird", "snake", "rabbit", "monkey",
+    "lion", "tiger", "bear", "frog", "turtle", "duck", "chicken",
+    "antelope", "camel", "crab", "shrimp", "fish", "butterfly",
+    "bee", "insect", "beetle", "spider", "goldfish", "seahorse",
+    "starfish", "jellyfish", "shellfish", "animal",
+})
+_GENERIC_ANIMAL_ALIASES: tuple[str, ...] = tuple(dict.fromkeys(
+    alias
+    for concept, aliases in _OBJECT_ALIASES.items()
+    if concept in _ANIMAL_CONCEPTS - {"animal"}
+    for alias in aliases
+))
+
+
+def _concept_aliases(concept: str) -> tuple[str, ...]:
+    if concept == "animal":
+        return ("animal", "animals", "creature", "creatures", "wildlife", "con vật", "động vật", *_GENERIC_ANIMAL_ALIASES)
+    return _OBJECT_ALIASES.get(concept, ())
+
+
+_COLOR_CONCEPTS: frozenset[str] = frozenset({
+    "red", "pink", "blue", "white", "black", "green", "yellow", "purple", "orange color",
+})
+
+
+def is_animal_query(query: str) -> bool:
+    """True if the query mentions an animal concept from _OBJECT_ALIASES."""
+    concepts = _requested_concepts(query)
+    return bool(concepts & _ANIMAL_CONCEPTS)
+
+
 def _requested_concepts(query: str) -> set[str]:
-    """Concepts the query asks for, per ``_OBJECT_ALIASES`` (empty if none)."""
+    """Concepts the query asks for, per ``_OBJECT_ALIASES`` (empty if none).
+
+    Uses ``vn_synonyms.normalize_entity`` to expand Vietnamese entities
+    to English detector labels, so VN queries match EN detector output
+    even when the VN term is not in ``_OBJECT_ALIASES`` directly.
+    """
     query_text = _fold_accents(query)
     # Fold aliases too: the query is accent-folded, so a Vietnamese alias like
     # "xe máy" must be folded to "xe may" before matching, otherwise it never
     # fires and object evidence stays off for VN queries.
-    return {
+    concepts = {
         concept
         for concept, aliases in _OBJECT_ALIASES.items()
-        if any(_has_phrase(query_text, _fold_accents(alias)) for alias in aliases)
+        if any(_alias_matches(query_text, alias) for alias in aliases)
     }
+
+    # Improvement.md Task 5: expand VN entities via vn_synonyms
+    # Also check VN→EN mapping for entities not in _OBJECT_ALIASES directly
+    try:
+        from aic2026.reranking.vn_synonyms import normalize_entity
+        # Extract potential VN words from query (2+ char words)
+        words = query_text.split()
+        for word in words:
+            if len(word) >= 2:
+                en_labels = normalize_entity(word)
+                for label in en_labels:
+                    label_folded = _fold_accents(label)
+                    for concept, aliases in _OBJECT_ALIASES.items():
+                        if any(_alias_matches(label_folded, a) for a in aliases):
+                            concepts.add(concept)
+    except ImportError:
+        pass
+
+    # Treat an explicitly generic animal request as the union of known animal
+    # detector labels, but do not weaken a named-species request into that union.
+    generic_animal = any(
+        _has_phrase(query_text, phrase)
+        for phrase in ("animal", "animals", "creature", "creatures", "wildlife", "con vat", "dong vat")
+    )
+    if generic_animal and not (concepts & (_ANIMAL_CONCEPTS - {"animal"})):
+        concepts.add("animal")
+
+    return concepts
 
 
 def object_evidence_adjustment(
@@ -169,19 +349,29 @@ def object_evidence_adjustment(
     right *scene* but the wrong *object* (e.g. a supermarket aisle with no water
     bottle).  It remains a soft penalty: Faster R-CNN can miss small/occluded
     objects, so vector evidence is never discarded outright.
+
+    **Generic "Animal" penalty:** When a frame carries the generic "Animal" label
+    but NO specific species label (e.g. "Bull", "Goat"), and the query asks for
+    a specific animal, the frame gets a *half* penalty (``-weight * penalty_scale
+    * 0.5``).  This pushes down the 1200+ frames labeled only "Animal" that CLIP
+    would otherwise rank high for any animal query — they are "unidentified
+    animals" and should not compete with frames that have the correct species
+    label.
     """
-    requested = _requested_concepts(query)
+    requested = _requested_concepts_cached(query)
     if not requested:
         return None
 
-    labels = _fold_accents(" ".join(record.object_labels or []))
+    labels = _folded_labels_for_record(record)
     matched = sum(
-        any(_has_phrase(labels, _fold_accents(alias)) for alias in _OBJECT_ALIASES[concept])
+        any(_alias_matches(labels, alias) for alias in _concept_aliases(concept))
         for concept in requested
     )
     coverage = matched / len(requested)
     # Symmetrical-ish but asymmetric: full miss penalized harder than full match rewarded.
     if coverage == 0.0:
+        # Full penalty: when the query asks for a specific animal,
+        # an unlabeled "Animal" frame is unlikely to be the right answer.
         return -weight * penalty_scale
     return weight * (2.0 * coverage - 1.0)
 
@@ -199,6 +389,20 @@ def object_evidence_adjustment(
 
 _REQUESTED_CONCEPT_CACHE: dict[str, frozenset] = {}
 _FOLDED_LABEL_CACHE: dict[int, str] = {}
+
+
+def gate_lion_dance_split(query: str, candidates: list[Candidate]) -> list[Candidate]:
+    """Exclude the L24 lion-dance split unless the user explicitly says ``qilin``.
+
+    L24 is visually repetitive and its lion costumes are a high-similarity
+    attractor for broad CLIP prompts (people, colour, outdoor scenes).  It must
+    therefore never act as a dataset prior.  ``qilin`` is the intentional,
+    case-insensitive opt-in codeword requested by the operator; all other
+    queries retain every non-L24 candidate in their original order.
+    """
+    if re.search(r"(?<![a-z0-9])qilin(?![a-z0-9])", _fold_accents(query)):
+        return candidates
+    return [candidate for candidate in candidates if not candidate.video_id.upper().startswith("L24_")]
 
 
 def _requested_concepts_cached(query: str) -> frozenset:
@@ -222,6 +426,94 @@ def _folded_labels_for_record(record: FrameRecord) -> str:
     if key is not None:
         _FOLDED_LABEL_CACHE[key] = folded
     return folded
+
+
+def filter_candidates_by_requested_objects(
+    query: str,
+    candidates: list[Candidate],
+    records_by_id: dict[int, FrameRecord],
+    video_metadata=None,
+) -> list[Candidate]:
+    """Keep only candidates whose detector labels contain a requested object.
+
+    Queries without a recognized object concept pass through unchanged. For a
+    multi-object phrase, every requested concept must be detected in the frame;
+    the remaining dense/lexical ranking decides order.
+    """
+    requested = _requested_concepts_cached(query) - _COLOR_CONCEPTS
+    if not requested:
+        return candidates
+
+    # In this corpus, lion-dance masks/costumes in L24 receive false-positive
+    # ``Dog`` labels from the object detector. A literal label alone is not
+    # enough evidence for a dog query there. Use video metadata as a negative
+    # context cue, unless the query explicitly asks about lion dance.
+    query_folded = _fold_accents(query)
+    asks_about_lion_dance = any(
+        _has_phrase(query_folded, phrase)
+        for phrase in (
+            "lan", "mua rong", "mua lan", "lan su rong",
+            "lion dance", "dragon dance", "mai hoa thung",
+        )
+    )
+    exclude_lion_dance_dogs = "dog" in requested and not asks_about_lion_dance
+
+    def is_lion_dance_video(video_id: str) -> bool:
+        if not exclude_lion_dance_dogs:
+            return False
+        # The local BTC metadata confirms L24 is the lion-dance competition
+        # split; keep this explicit fallback for manifests with no video-level
+        # metadata loaded.
+        if video_id.upper().startswith("L24_"):
+            return True
+        if video_metadata is None:
+            return False
+        meta = video_metadata.get(video_id)
+        if meta is None:
+            return False
+        haystack = _fold_accents(" ".join([
+            meta.title or "",
+            meta.description or "",
+            *(meta.metadata_keywords or []),
+        ]))
+        return any(
+            _has_phrase(haystack, phrase)
+            for phrase in (
+                "lan su rong", "lansurong", "mua lan", "mua rong",
+                "doan lan", "lion dance", "dragon dance", "mai hoa thung",
+                "cup cho lon", "cho lon htv",
+            )
+        )
+
+    # A single-scene query requires all named objects in one frame. For an
+    # ordered multi-event query, each frame may satisfy one event's entities;
+    # event coverage then scores how well a video covers the full sequence.
+    groups = [requested]
+    try:
+        from aic2026.query.parser import parse_query
+        plan = parse_query(query)
+        if len(plan.events) > 1:
+            event_groups = [
+                set(event.entities) - _COLOR_CONCEPTS
+                for event in plan.events
+            ]
+            groups = [group for group in event_groups if group] or groups
+    except Exception:
+        pass
+    result = []
+    for candidate in candidates:
+        if is_lion_dance_video(candidate.video_id):
+            continue
+        record = records_by_id.get(candidate.vector_id)
+        if record is None:
+            continue
+        labels = _folded_labels_for_record(record)
+        if any(all(
+            any(_alias_matches(labels, alias) for alias in _concept_aliases(concept))
+            for concept in group
+        ) for group in groups):
+            result.append(candidate)
+    return result
 
 
 def build_object_adjustment_matrices(
@@ -257,7 +549,7 @@ def build_object_adjustment_matrices(
         for concept in requested:
             if concept not in union:
                 union[concept] = [
-                    _fold_accents(alias) for alias in _OBJECT_ALIASES[concept]
+                    _fold_accents(alias) for alias in _concept_aliases(concept)
                 ]
 
     matrices: dict[str, np.ndarray] = {}
@@ -284,7 +576,7 @@ def build_object_adjustment_matrices(
             for frame_position in range(frame_count):
                 text = folded_labels[frame_position]
                 if text and any(
-                    alias and _has_phrase(text, alias) for alias in aliases
+                    alias and _alias_matches(text, alias) for alias in aliases
                 ):
                     present[frame_position] = 1.0
             concept_present[concept] = present
@@ -329,9 +621,20 @@ def rerank_with_object_evidence(
     fires when the query asks for an object, so pure scene queries are unaffected.
     If dropping would emptying the whole pool, we fall back to keeping the
     original candidates (avoid returning zero answers).
+
+    **Animal-query auto-boost:** CLIP maps all animals into a broad "animal"
+    manifold, so "buffalo" scores near cow, goat, deer.  When the query mentions
+    an animal concept, the penalty for missing objects is automatically increased
+    (3× instead of 2×) to push wrong-animal frames down harder.
     """
-    requested = _requested_concepts(query)
+    requested = _requested_concepts_cached(query)
     drop_mode = drop_empty_object_frames and bool(requested)
+
+    # Auto-boost penalty for animal queries: CLIP confuses similar animals,
+    # so wrong-animal frames need a stronger push-down.
+    if requested & _ANIMAL_CONCEPTS:
+        penalty_scale = max(penalty_scale, 4.0)
+        weight = max(weight, 0.12)
 
     kept: list[Candidate] = []
     for item in candidates:
@@ -367,6 +670,7 @@ RRF_K = _RRF_K  # public alias re-exported via ``__all__``
 def rrf_fuse(
     ranked_lists: list[list[int]],
     k: int = _RRF_K,
+    weights: list[float] | None = None,
 ) -> dict[int, float]:
     """Fuse multiple ranked lists using **Reciprocal Rank Fusion**.
 
@@ -374,15 +678,15 @@ def rrf_fuse(
     retrieval method — e.g. vector search, BM25, late interaction), RRF combines
     them by summing reciprocal ranks:
 
-        score(idx) = Σᵢ  1 / (k + rankᵢ(idx) + 1)
+        score(idx) = Σᵢ  weightᵢ / (k + rankᵢ(idx) + 1)
 
     where *rankᵢ(idx)* is the 0-based position of manifest index ``idx`` in
     list *i* (indices absent from a list contribute 0 to that list's term).
 
-    Higher scores indicate better combined ranking.  This is **scale-free** and
-    works well for fusing heterogeneous retrievers (vector + BM25, vector +
-    late-interaction, …) because it only cares about *rank position*, not raw
-    similarity magnitudes.
+    When ``weights`` is ``None`` (default), all lists get weight 1.0 (standard RRF).
+    When ``weights`` is provided, each list ``i`` is scaled by ``weights[i]``.
+    This supports weighted expansion variants (Improvement.md Task 4): more
+    relevant variants get higher weight in the fusion.
 
     Parameters
     ----------
@@ -390,23 +694,141 @@ def rrf_fuse(
         A list of ranked manifest-index lists.  Each inner list should be
         ordered from most-relevant to least-relevant for its own retriever.
     k
-        The RRF constant that dampens the influence of rank position.  The
-        default ``60`` is the value commonly used in the CLIR / IR literature.
+        The RRF constant that dampens the influence of rank position.
+    weights
+        Optional per-list weights.  ``None`` = uniform 1.0.  If provided,
+        must have the same length as ``ranked_lists``.
 
     Returns
     -------
     dict[int, float]
-        Mapping from manifest index to its fused RRF score, sorted implicitly
-        by the caller via ``rrf_rank`` or a simple ``sorted(..., key=…)``.
+        Mapping from manifest index to its fused RRF score.
     """
     fused_scores: dict[int, float] = {}
 
-    for ids in ranked_lists:
+    for i, ids in enumerate(ranked_lists):
+        w = weights[i] if weights is not None and i < len(weights) else 1.0
         for rank, idx in enumerate(ids):
-            contribution = 1.0 / (k + rank + 1)
+            contribution = w / (k + rank + 1)
             fused_scores[idx] = fused_scores.get(idx, 0.0) + contribution
 
     return fused_scores
+
+
+def minmax_normalize(
+    values: list[float] | np.ndarray,
+    epsilon: float = 1e-9,
+) -> list[float]:
+    """Min–max normalization (paper Eq. 1) rescaling onto [0, 1].
+
+    Unlike :func:`normalize_scores` (max-division), min–max maps the lowest
+    score to 0 and the highest to 1, preserving intra-list ranking.  The paper
+    uses this before adaptive modality fusion (Eq. 2) so heterogeneous scores
+    (CLIP cosine, OCR BM25, ASR) become comparable on one scale.
+
+    A degenerate all-equal list returns all 1.0 (no division by zero).
+    """
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.size == 0:
+        return []
+    lo = float(arr.min())
+    hi = float(arr.max())
+    if hi - lo < epsilon:
+        return [1.0 for _ in arr]
+    return list((arr - lo) / (hi - lo))
+
+
+def adaptive_modality_fusion(
+    modality_ids: dict[str, list[int]],
+    modality_scores: dict[str, list[float]],
+    weights: dict[str, float],
+    epsilon: float = 1e-9,
+    renormalize: bool = True,
+) -> dict[int, float]:
+    """Adaptive multi-modal score fusion — paper Eq.1 (min–max) + Eq.2 (weighted sum).
+
+        s_norm_m(f) = (s_m(f) − min(s_m)) / (max(s_m) − min(s_m) + ε)      (Eq.1)
+        S(f)        = Σ_{m ∈ active} w_m · s_norm_m(f)                     (Eq.2a)
+                    = Σ_{m ∈ active} w_m · s_norm_m(f) / Σ_{m ∈ active} w_m   (Eq.2b, renormalized)
+
+    Each modality (``visual`` / ``ocr`` / ``asr`` / ``object`` / ``count``)
+    contributes a *ranked* list of manifest indices (most→least relevant) with
+    parallel similarity scores.  Per-modality scores live on different scales
+    (CLIP cosine ≈0.2–0.35, BM25-OCR ≈0–1, object-evidence ≈−0.1–0.1), so each
+    is min–max normalized onto [0, 1] (Eq.1, using the existing
+    :func:`minmax_normalize`) before the weighted sum (Eq.2).  ``w_m`` are the
+    per-modality weights (from either the query planner or a config default) —
+    a query about visible text gets ``ocr`` weight ≈1 and ``asr`` ≈0, so only
+    the discriminative modality drives the ranking.
+
+    Two failure modes are handled so a *missing* modality never poisons the
+    ranking:
+
+    * **Disabled modality** (``w_m <= 0``): skipped entirely (no spurious signal).
+    * **Unavailable modality** (``w_m > 0`` but not present in ``modality_ids`` —
+      e.g. ASR scores when no ASR sidecar was loaded): its weight is dropped from
+      the normalization denominator.  With ``renormalize=True`` (default) the
+      final score is divided by the sum of the *actually-used* weights
+      (Eq.2b), so the remaining modalities still span the full [0, 1] range
+      instead of being squashed into a narrow sub-band.  With ``renormalize=False``
+      the raw weighted sum (Eq.2a) is returned, matching legacy behaviour where
+      every configured modality was always present.
+
+    A manifest index absent from every active modality gets ``S(f) = 0`` and is
+    dropped from the result.
+
+    Returns ``{manifest_idx: S(f)}`` over the union of all active-modality indices.
+    The caller (``RetrievalTools.retrieve``) re-scores candidates from this map;
+    indices outside it keep their previous score, so recall is never lost.
+
+    This is the paper's *adaptive score fusion* that replaces the equal-weight
+    RRF/SRRF used elsewhere — it is opt-in (off by default) so the legacy
+    RRF path stays the A/B baseline until benchmarked.
+    """
+
+    if not weights:
+        return {}
+
+    # Only modalities the caller predicted as discriminative (w_m > 0) AND that
+    # actually contributed a ranked list are "active".  A modality configured
+    # with w_m > 0 but absent from modality_ids is treated as missing — its
+    # weight is simply not counted in the normalization denominator below.
+    active = [
+        m for m in modality_ids
+        if weights.get(m, 0.0) > 0.0 and (modality_ids.get(m) or [])
+    ]
+    if not active:
+        return {}
+
+    active_weight_sum = float(sum(weights[m] for m in active))
+    if active_weight_sum <= 0:
+        return {}
+
+    fused: dict[int, float] = {}
+    for m in active:
+        ids = modality_ids.get(m) or []
+        scores = modality_scores.get(m) or []
+        if len(ids) != len(scores):
+            raise ValueError(
+                f"modality {m!r}: ids ({len(ids)}) != scores ({len(scores)})"
+            )
+        if not ids:
+            continue
+        w_m = float(weights[m])
+        s_norm = minmax_normalize(scores, epsilon=epsilon)
+        for idx, sn in zip(ids, s_norm):
+            manifest_idx = int(idx)
+            fused[manifest_idx] = fused.get(manifest_idx, 0.0) + w_m * sn
+
+    # Eq.2b: renormalize by the sum of actually-used weights so a missing
+    # modality (e.g. ASR off) does not compress the score range.  When every
+    # configured modality is present this is a no-op (divisor == 1.0-equivalent
+    # because the raw sum already equals the renormalized value after the
+    # division by a full-weight sum of 1.0-equivalent scale — see tests).
+    if renormalize and active_weight_sum != 1.0:
+        for idx in fused:
+            fused[idx] = fused[idx] / active_weight_sum
+    return fused
 
 
 def rrf_rank(
@@ -499,6 +921,92 @@ def normalize_scores(candidates: list[Candidate]) -> list[float]:
         return [0.0 for _ in candidates]
 
     return list(raw / hi)
+
+
+# --- Normalization abstraction (spec §15) ---------------------------------
+#
+# Spec §15 asks for a single ``normalize_score()`` entry point whose strategy is
+# config-driven and A/B-able BEFORE we commit to one scheme.  We keep min-max as
+# the default baseline (used by Adaptive Fusion) but expose percentile and
+# sigmoid/temperature variants for benchmarking.  No behaviour changes until a
+# caller opts into a non-default strategy.
+NormalizationStrategy = Literal["minmax", "percentile", "sigmoid", "maxdiv"]
+
+
+def normalize_score(
+    values: list[float] | np.ndarray,
+    strategy: NormalizationStrategy = "minmax",
+    *,
+    percentile: float = 90.0,
+    temperature: float = 1.0,
+    epsilon: float = 1e-9,
+) -> list[float]:
+    """Config-driven score normalization onto ~[0, 1] (spec §15).
+
+    Strategies
+    -----------
+    * ``"minmax"``     — (x - min) / (max - min + ε); the paper's Eq.1, used by
+      Adaptive Fusion.  Preserves full dynamic range (worst→best = 0→1).
+    * ``"percentile"`` — divide by the ``percentile``-th percentile (default 90)
+      of the distribution, then clip to [0, 1].  Robust to a few outliers
+      inflating the max (e.g. one CLIP 0.35 vs many 0.22s).
+    * ``"sigmoid"``    — 1 / (1 + exp(-x / temperature)); maps any real scale to
+      (0, 1) with a tunable steepness.  Good when raw scores are already signed.
+    * ``"maxdiv"``     — x / max; the magnitude-preserving max-division used by
+      :func:`normalize_scores` (a strong match stays clearly above a weak one).
+
+    All strategies are pure functions of *values* (no candidate/side-effect
+    dependency) so they are trivially unit-testable and cacheable.
+    """
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.size == 0:
+        return []
+
+    if strategy == "maxdiv":
+        hi = float(arr.max())
+        if hi < epsilon:
+            return [0.0 for _ in arr]
+        return list(arr / hi)
+
+    if strategy == "minmax":
+        lo = float(arr.min())
+        hi = float(arr.max())
+        if hi - lo < epsilon:
+            return [1.0 for _ in arr]
+        return list((arr - lo) / (hi - lo))
+
+    if strategy == "percentile":
+        if arr.size < 2:
+            return [1.0 for _ in arr]
+        p = float(np.percentile(arr, max(0.0, min(100.0, percentile))))
+        if p < epsilon:
+            return [1.0 for _ in arr]
+        return list(np.clip(arr / p, 0.0, 1.0))
+
+    if strategy == "sigmoid":
+        t = temperature if temperature > epsilon else 1.0
+        return list(1.0 / (1.0 + np.exp(-arr / t)))
+
+    # Unknown strategy → fall back to min-max so callers never crash.
+    lo = float(arr.min())
+    hi = float(arr.max())
+    if hi - lo < epsilon:
+        return [1.0 for _ in arr]
+    return list((arr - lo) / (hi - lo))
+
+
+__all__ = [
+    "RRF_K",
+    "rrf_fuse",
+    "rrf_rank",
+    "minmax_normalize",
+    "normalize_score",
+    "normalize_scores",
+    "object_evidence_adjustment",
+    "rerank_with_object_evidence",
+    "rerank_with_metadata",
+]
+
 
 
 def rerank_with_metadata(

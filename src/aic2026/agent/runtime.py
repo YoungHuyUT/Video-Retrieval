@@ -9,6 +9,7 @@ from aic2026.tasks import default_registry
 from .local_llm import LocalLLM
 from .tools import RetrievalTools
 from .types import AgentDecision, AgentPlan, AgentResult, AgentTrace
+from aic2026.temporal.alignment import decay_alpha_from_wording
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,27 @@ class RetrievalAgent:
         # splits, so excluding L21/L22/L25/etc. would silently zero recall. Pass
         # None to disable the preference; pass a concrete list to override it.
         trake_preferred_prefixes: list[str] | None = None,
+        # Query understanding (III/IV). When True, ``run`` builds a structured
+        # :class:`QueryPlan` (LLM-backed local planner, rule-based fallback) and
+        # attaches it to the returned plan so downstream rerank stages can read
+        # entities / constraints / modality weights. Enabled by default for
+        # production-quality query understanding.
+        use_query_planner: bool = False,
+        planner_model: str = "qwen3:0.6b",
+        planner_url: str = "http://127.0.0.1:11434",
+        planner_timeout: float = 8.0,
+        # Phase 6 (spec IX + §9): turn on exponential inter-event temporal
+        # decay for TRAKE (paper Eq.3). The decay alpha is auto-derived from the
+        # query wording (immediately>then>later) unless overridden per-call. Off
+        # by default so the legacy penalty-weight DP stays A/B baseline A.
+        use_temporal_decay: bool = False,
+        temporal_decay_alpha: float = 0.01,
+        # Phase 7 (spec X, rule 12): re-rank KIS/Q&A candidates by how well their
+        # object labels satisfy the structured COUNT/ATTRIBUTE constraints. Weak-
+        # label-safe: videos without object_labels are no-ops (never penalised),
+        # because the user's self-extracted keyframes carry no detector output.
+        # Off by default so legacy CLIP+BM25 stays baseline A.
+        use_constraint_verification: bool = False,
     ) -> None:
         if answer_limit <= 0:
             raise ValueError("answer_limit must be greater than zero")
@@ -50,6 +72,14 @@ class RetrievalAgent:
         # vài nghìn video. 0 = xét hết (backward-compatible).
         self.coarse_top_k = 200
         self.trake_preferred_prefixes = trake_preferred_prefixes
+        self.use_query_planner = use_query_planner
+        self.planner_model = planner_model
+        self.planner_url = planner_url
+        self.planner_timeout = planner_timeout
+        self.use_temporal_decay = use_temporal_decay
+        self.temporal_decay_alpha = temporal_decay_alpha
+        # Phase 7: propagate onto tools (retrieve() reads the flag from there).
+        self.tools.use_constraint_verification = use_constraint_verification
         # Bật dịch VI→EN tự động. Mặc định False (tắt) vì:
         #  (1) người dùng có thể nhập sẵn tiếng Anh;
         #  (2) dịch phụ thuộc Ollama — nếu fail thì gây ra frame sai;
@@ -86,12 +116,16 @@ class RetrievalAgent:
         plan: AgentPlan,
     ) -> list[str]:
         """Return the authoritative ordered events for a TRAKE query."""
-        import re
-        events = list(query.events) if query.events else list(plan.events)
-        if not events and query.text:
-            parts = [p.strip() for p in re.split(r'[\n;.]+', query.text) if p.strip()]
-            if parts:
-                events = parts
+        # Explicit multi-line/API events win.  A single event equal to the raw
+        # query is only a UI placeholder, so parse it into its ordered actions.
+        explicit = list(query.events) if query.events else list(plan.events)
+        raw = query.text.strip()
+        events = explicit if len(explicit) > 1 or (explicit and explicit[0].strip() != raw) else []
+        if not events and raw:
+            from aic2026.query.parser import parse_query
+
+            parsed = parse_query(raw)
+            events = [event.description for event in parsed.events if event.description.strip()]
         if not events:
             events = [query.text]
         return events
@@ -122,8 +156,18 @@ class RetrievalAgent:
         # tiếp bằng LLM để sửa lỗi chính tả EN, LLM lỗi tự fallback bản offline.
         from .translator import translate_query_fields
 
+        # Lưu query gốc (nguyên bản, trước khi dịch) để dùng làm fallback cho
+        # ASR matching. Transcript (phụ đề) là tiếng Việt, nên so khớp phải dùng
+        # bản VI — KHÔNG dùng bản EN đã dịch. Khi user không nhập ô "ASR query"
+        # riêng, ta tự động dùng query gốc VI này thay vì query.text (đã EN).
+        original_text = query.text
+
         if self.translate:
-            use_llm = self.llm is not None
+            # Translation sits on the critical retrieval path.  The offline
+            # translator is deterministic and instant; LLM query planning stays
+            # an explicit opt-in below instead of adding an Ollama round-trip to
+            # every long KIS query.
+            use_llm = False
             translated_text, translated_question, translated_events, translated_changed, translation_source = (
                 translate_query_fields(
                     query.text,
@@ -177,6 +221,40 @@ class RetrievalAgent:
         # an algorithmic rerank (metadata bonus + MMR diversity). This is the
         # fastest, most stable path and is the default for KIS/Q&A.
         # TRAKE keeps its deterministic event-wise retrieval + DP alignment.
+        #
+        # Query understanding (Task 2 / III-IV): optionally build a structured
+        # QueryPlan from the raw text. This is LOCAL (Ollama) and cached per
+        # query string, so it only runs once and falls back to a rule-based
+        # parser on any failure. The plan is carried on ``AgentPlan.query_plan``
+        # so later stages (object/count verification) can consume it; retrieval
+        # itself still uses the raw query text as the CLIP/BM25 input today.
+        from aic2026.query import plan_query
+
+        query_plan_obj = None
+        planner_built = False
+        if self.use_query_planner and query.text:
+            try:
+                query_plan_obj = plan_query(
+                    query.text,
+                    use_llm=True,
+                    model=self.planner_model,
+                    base_url=self.planner_url,
+                    timeout_seconds=self.planner_timeout,
+                )
+                planner_built = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Query planner failed; using raw query: %s", exc)
+        rationale = (
+            "Deterministic plan with LLM-backed query understanding (QueryPlan "
+            "attached). Retrieval uses CLIP + BM25 RRF; selection uses "
+            "algorithmic rerank."
+            if planner_built
+            else "Deterministic plan: no LLM planner. Retrieval uses CLIP + BM25 "
+            "RRF; selection uses algorithmic rerank (metadata bonus + MMR)."
+        ) if self.use_query_planner else (
+            "Deterministic plan: no LLM planner. Retrieval uses CLIP + BM25 "
+            "RRF; selection uses algorithmic rerank (metadata bonus + MMR)."
+        )
         plan = AgentPlan(
             query_variants=[query.text],
             events=(
@@ -184,15 +262,19 @@ class RetrievalAgent:
                 if query.type == "trake"
                 else []
             ),
-            rationale=(
-                "Deterministic plan: no LLM planner. Retrieval uses CLIP + BM25 "
-                "RRF; selection uses algorithmic rerank (metadata bonus + MMR)."
+            rationale=rationale,
+            query_plan=(
+                query_plan_obj.model_dump() if query_plan_obj is not None else None
             ),
         )
         trace.append(
             AgentTrace(
                 step="plan",
-                detail=plan.rationale,
+                detail=(
+                    f"QueryPlan: {query_plan_obj.global_query!r}"
+                    if planner_built
+                    else plan.rationale
+                ),
             )
         )
 
@@ -222,6 +304,14 @@ class RetrievalAgent:
                     if self.trake_preferred_prefixes is not None
                     else ["L26"]
                 ),
+                use_temporal_decay=self.use_temporal_decay,
+                # Auto-derive alpha from ordering wording when using decay
+                # (immediately>then>later); explicit config still wins if set.
+                temporal_decay_alpha=(
+                    self.temporal_decay_alpha
+                    if not self.use_temporal_decay
+                    else decay_alpha_from_wording(query.text)
+                ),
             )
 
             trace.append(
@@ -249,10 +339,25 @@ class RetrievalAgent:
         # every split. OCR itself is scoped to L25 at build time; retrieval is
         # not.
         self.tools.video_prefixes = None
+        # ASR matching dùng transcript TIẾNG VIỆT.
+        # CHỈ bật ASR cho NOTEBOOK track. KIS/QA/TRAKE KHÔNG dùng ASR
+        # (transcript tiếng Việt không khớp query tiếng Anh → nhiễu).
+        # Nếu user không nhập ô "ASR query" riêng, fallback về query gốc VI
+        # (original_text) thay vì query.text đã dịch EN.
+        asr_query_for_match = None
+        if query.type == "notebook":
+            asr_query_for_match = query.asr_query or (original_text if self.translate else None)
+            if asr_query_for_match is not None and asr_query_for_match.strip():
+                self.tools.use_asr = True
+        else:
+            # KIS/QA/TRAKE: không dùng ASR (transcript tiếng Việt ≠ query tiếng Anh)
+            self.tools.use_asr = False
         found = self.tools.retrieve(
             query=query.text,
             limit=self.retrieval_pool_size,
             task_type=query.type,
+            query_plan=query_plan_obj,
+            asr_query=asr_query_for_match,
         )
         trace.append(
             AgentTrace(
@@ -306,31 +411,11 @@ class RetrievalAgent:
             reverse=True,
         )
 
-        if query.type == "qa":
-            # Free the CLIP encoder (retrieval is done) so Florence-2 can load on
-            # low-RAM machines without OOM-ing on the combined ~1.2GB footprint.
-            self.tools.close_text_encoder()
-            # Lazily build Florence-2 only now (after CLIP is freed) so the two
-            # heavy models are never resident at once. KIS/TRAKE have vlm_model
-            # None so this is a no-op there.
-            self.tools.ensure_vlm()
-            answers = self.tools.answer_question(
-                query.question or query.text,
-                candidates,
-            )
-            # Release VLM weights now that answering is finished.
-            self.tools.close_vlm()
-
-            if answers:
-                for item in candidates:
-                    if item.vector_id is not None and item.vector_id in answers:
-                        item.answer = answers[item.vector_id]
-
-            # Fallback for candidates missing an answer (e.g. VLM offline/failed/unavailable)
-            for item in candidates:
-                if not item.answer:
-                    q_text = (query.question or query.text).strip()
-                    item.answer = f"Visible in keyframe"
+        # Q&A no longer auto-generates answers with a VLM (too slow). The human
+        # inspects the retrieved keyframe gallery in the Streamlit UI, picks the
+        # correct frame(s), and types the answer into a single shared box. Until
+        # then ``Candidate.answer`` stays None. We therefore leave answers
+        # entirely to the UI and only do the (video_id, frame_id) dedup here.
 
         # Deduplicate to keep the highest-scoring candidate for each (video_id, frame_id)
         seen_frame = set()

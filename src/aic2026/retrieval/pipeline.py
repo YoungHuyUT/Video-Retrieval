@@ -33,6 +33,64 @@ _RRF_K_MIN = 1
 _RRF_K_MAX = 60
 
 
+
+def dedupe_temporal(
+    candidates: list[Candidate],
+    records: dict[int, FrameRecord] | None = None,
+    window_seconds: float = 1.5,
+) -> list[Candidate]:
+    """Group same-video frames within a temporal window, keep highest score.
+
+    Improvement.md Task 6: Temporal dedupe before video-level rerank.
+    Near-duplicate frames (same video, within ``window_seconds``) are grouped
+    and only the highest-scoring frame per group is kept.  This prevents
+    temporal clusters of similar frames from inflating a video's log-sum-exp
+    score via repeated near-duplicates.
+    """
+    if not candidates:
+        return []
+
+    by_video: dict[str, list[Candidate]] = {}
+    for c in candidates:
+        by_video.setdefault(c.video_id, []).append(c)
+
+    deduped: list[Candidate] = []
+    for video_id, frames in by_video.items():
+        if len(frames) <= 1:
+            deduped.extend(frames)
+            continue
+
+        def _sort_key(c: Candidate) -> float:
+            if records and c.vector_id is not None:
+                rec = records.get(c.vector_id)
+                if rec is not None:
+                    ts = getattr(rec, "timestamp_seconds", None)
+                    if ts is None:
+                        ts = getattr(rec, "timestamp", None)
+                    if ts is not None:
+                        return float(ts)
+            if c.timestamp is not None:
+                return float(c.timestamp)
+            return float(c.frame_id)
+
+        frames.sort(key=_sort_key)
+
+        groups: list[list[Candidate]] = [[frames[0]]]
+        for frame in frames[1:]:
+            last_group = groups[-1]
+            last_ts = _sort_key(last_group[-1])
+            cur_ts = _sort_key(frame)
+            if (cur_ts - last_ts) <= window_seconds:
+                last_group.append(frame)
+            else:
+                groups.append([frame])
+
+        for group in groups:
+            best = max(group, key=lambda c: c.score)
+            deduped.append(best)
+
+    return deduped
+
 class RetrievalPipeline:
     """Frame retrieval with separate raw and diversified candidate stages.
 
@@ -160,16 +218,13 @@ class RetrievalPipeline:
         self,
         ranked_lists: list[np.ndarray],
         k: int | None = None,
+        weights: list[float] | None = None,
     ) -> dict[int, float]:
         """Fuse ranked manifest indices using Reciprocal Rank Fusion.
 
-        When *k* is ``None`` (the default) it is chosen **adaptively** based on
-        the largest input list length so that small candidate pools — where the
-        classic ``k=60`` compresses the rank contribution ``1/(k+rank+1)`` into a
-        near-constant dynamic range — still preserve discriminative rank weight.
-        Larger pools use ``k`` closer to the standard 60.
-
-        ``k`` is clamped to ``[_RRF_K_MIN, _RRF_K_MAX]`` = ``[1, 60]``.
+        Optional *weights* parameter scales the RRF contribution of each input list,
+        allowing primary queries (weight 1.0) to take priority over partial/fine-detail
+        sub-queries (weights 0.5 - 0.8).
         """
 
         if k is None:
@@ -182,10 +237,11 @@ class RetrievalPipeline:
 
         fused_scores: dict[int, float] = {}
 
-        for ids in ranked_lists:
+        for list_idx, ids in enumerate(ranked_lists):
+            w = weights[list_idx] if weights and list_idx < len(weights) else 1.0
             for rank, idx in enumerate(ids):
                 manifest_idx = int(idx)
-                contribution = 1.0 / (k + rank + 1)
+                contribution = w / (k + rank + 1)
                 fused_scores[manifest_idx] = (
                     fused_scores.get(manifest_idx, 0.0) + contribution
                 )
@@ -226,6 +282,8 @@ class RetrievalPipeline:
                     score=float(scores_by_manifest_idx[manifest_idx]),
                     vector_id=record.vector_id,
                     keyframe_path=record.keyframe_path,
+                    timestamp=record.timestamp,
+                    frame_unit=record.frame_unit,
                 )
             )
 
@@ -381,6 +439,7 @@ class RetrievalPipeline:
         text_embedding: np.ndarray,
         top_frames: int,
         video_ids: set[str] | None = None,
+        frame_indices: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Vector search, optionally pushed down to the DB via ``video_ids``.
 
@@ -388,9 +447,37 @@ class RetrievalPipeline:
         returned rows. Either way the metadata pre-filter runs at the index
         tier instead of post-hoc Python masking.
         """
+        if frame_indices is not None and hasattr(self.index, "search_filtered_indices"):
+            return self.index.search_filtered_indices(text_embedding, top_frames, frame_indices)
         if video_ids:
             return self.index.search_filtered(text_embedding, top_frames, video_ids)
         return self.index.search(text_embedding, top_frames)
+
+    def search_many_with_filter(
+        self,
+        embeddings: list[np.ndarray],
+        top_frames: int,
+        video_ids: set[str] | None = None,
+        frame_indices: np.ndarray | None = None,
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        """Batch vector search for multiple embeddings.
+
+        Uses ``index.search_many_filtered`` for a single matrix multiply
+        (2-4x faster than per-embedding loops). Returns a list of
+        (ids, scores) tuples, one per embedding.
+        """
+        if not embeddings:
+            return []
+        matrix = np.asarray(embeddings, dtype=np.float32)
+        if frame_indices is not None and hasattr(self.index, "search_many_filtered_indices"):
+            return self.index.search_many_filtered_indices(matrix, top_frames, frame_indices)
+        if hasattr(self.index, "search_many_filtered"):
+            return self.index.search_many_filtered(matrix, top_frames, video_ids)
+        # Fallback: per-embedding search (Chroma or legacy).
+        return [
+            self.search_with_filter(emb, top_frames, video_ids)
+            for emb in embeddings
+        ]
 
     def retrieve_raw(
         self,
@@ -534,6 +621,8 @@ class RetrievalPipeline:
         # video is never dropped. BTC event queries are generic and match many
         # splits, so a hard restrict would zero recall — this only biases ranking.
         preferred_prefixes: list[str] | None = None,
+        use_temporal_decay: bool = False,
+        temporal_decay_alpha: float = 0.01,
     ) -> list[Candidate]:
         """Rank videos and align one ordered frame to each event.
 
@@ -682,6 +771,8 @@ class RetrievalPipeline:
                     align_events_dp(
                         similarity_matrix=similarity_matrix,
                         penalty_weight=penalty_weight,
+                        use_decay=use_temporal_decay,
+                        decay_alpha=temporal_decay_alpha,
                     )
                 )
             except ValueError:
@@ -739,6 +830,8 @@ class RetrievalPipeline:
                     keyframe_path=(
                         representative_record.keyframe_path
                     ),
+                    timestamp=representative_record.timestamp,
+                    frame_unit=representative_record.frame_unit,
                     event_frames=event_frames,
                 )
             )
@@ -897,6 +990,8 @@ class RetrievalPipeline:
                         score=score,
                         vector_id=rec.vector_id,
                         keyframe_path=rec.keyframe_path,
+                        timestamp=rec.timestamp,
+                        frame_unit=rec.frame_unit,
                     )
                 )
 

@@ -221,7 +221,8 @@ def load_manifest(path: Path) -> list[FrameRecord]:
         if not line:
             continue
         try:
-            records.append(FrameRecord.model_validate_json(line))
+            data = json.loads(line)
+            records.append(FrameRecord.model_construct(**data))
         except Exception:
             # Drop malformed lines rather than failing the entire manifest.
             continue

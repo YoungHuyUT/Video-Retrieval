@@ -5,7 +5,6 @@ from aic2026.reranking.color import (
     colour_fraction,
     _colour_prompt_variants,
     query_colours,
-    rerank_with_colour_evidence,
     object_colour_evidence,
     torso_colour_evidence,
 )
@@ -42,11 +41,3 @@ def test_object_colour_ignores_background_outside_car_box() -> None:
     car = [(0.3, 0.2, 0.7, 0.8)]
     assert object_colour_evidence(image, "red", car) == 0.0
     assert object_colour_evidence(image, "blue", car) > 0.9
-
-
-def test_missing_images_do_not_change_ranking() -> None:
-    candidates = [
-        Candidate(video_id="v1", frame_id=1, score=0.8, vector_id=1, keyframe_path="missing.jpg"),
-        Candidate(video_id="v2", frame_id=2, score=0.7, vector_id=2, keyframe_path="missing2.jpg"),
-    ]
-    assert rerank_with_colour_evidence("red car", candidates) == candidates

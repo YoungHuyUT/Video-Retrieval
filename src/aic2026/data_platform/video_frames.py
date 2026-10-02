@@ -130,19 +130,34 @@ def extract_deduplicated_keyframes(
     keyframes_root: Path,
     features_root: Path,
     encoder: OpenCLIPFrameEncoder,
+    sample_interval_sec: float | None = 1.0,
     cosine_threshold: float = 0.985,
     batch_size: int = 32,
     image_quality: int = 92,
     progress_callback: callable | None = None,
 ) -> ExtractionReport:
-    """Decode every frame, embed in batches, retain only semantically different frames.
+    """Sample keyframes uniformly in time and CLIP-embed only the sampled frames.
 
-    A frame is compared with the most recently retained frame, rather than every prior
-    frame: this removes static/near-duplicate shots but preserves a scene that returns
-    later in the video. Original 0-based video frame IDs are used as filenames.
+    Two modes:
+
+    * ``sample_interval_sec`` set (default 1.0s) — **coarse time-uniform sampling**.
+      Frames are kept at a fixed cadence (``round(fps * interval)`` frames apart,
+      always including frame 0). Only those sampled frames are decoded-and-embedded,
+      so cost scales with wall-clock time, not frame count: a 10-min 30fps video
+      becomes ~600 frames instead of ~18k. This is the fast, coverage-safe path for
+      retrieval (no scene is skipped) and is the recommended mode for building the
+      index. The cosine dedup is NOT applied here — sampling already controls density.
+    * ``sample_interval_sec is None`` — **legacy mode**: decode EVERY frame, embed
+      each, and keep only frames whose cosine to the last kept frame is ``<
+      cosine_threshold``. Retained for backward compatibility / re-ingest of short
+      clips where per-frame semantics matter.
+
+    Original 0-based video frame IDs are used as filenames in both modes.
     """
-    if not 0 < cosine_threshold < 1:
-        raise ValueError("cosine_threshold must be in (0, 1)")
+    if sample_interval_sec is not None and sample_interval_sec <= 0:
+        raise ValueError("sample_interval_sec must be > 0 (or None for legacy mode)")
+    if sample_interval_sec is None and not 0 < cosine_threshold < 1:
+        raise ValueError("cosine_threshold must be in (0, 1) in legacy mode")
     try:
         import cv2
         from PIL import Image
@@ -158,6 +173,14 @@ def extract_deduplicated_keyframes(
     if not capture.isOpened():
         raise ValueError(f"Cannot decode video: {video_path}")
 
+    # ``CAP_PROP_FPS`` may be absent in lightweight test fakes; fall back to 0
+    # (yields frame_step=1, i.e. keep every frame) so sampling stays safe.
+    _fps_prop = getattr(cv2, "CAP_PROP_FPS", None)
+    fps = capture.get(_fps_prop) if _fps_prop is not None else 0.0
+    fps = float(fps or 0.0)
+    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) if hasattr(cv2, "CAP_PROP_FRAME_COUNT") else None
+    frame_step = max(1, round(fps * sample_interval_sec)) if sample_interval_sec else 1
+
     retained_vectors: list[np.ndarray] = []
     retained_ids: list[int] = []
     last_vector: np.ndarray | None = None
@@ -165,15 +188,21 @@ def extract_deduplicated_keyframes(
     pending_ids: list[int] = []
     decoded = 0
 
-    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) if hasattr(cv2, "CAP_PROP_FRAME_COUNT") else None
-
     def flush() -> None:
-        nonlocal last_vector
         if not pending_images:
             return
         vectors = _encode_images_in_chunks(encoder, pending_images, batch_size=batch_size)
-        for image, frame_id, vector in zip(pending_images, pending_ids, vectors):
-            if last_vector is None or _cosine(last_vector, vector) < cosine_threshold:
+        if sample_interval_sec is None:
+            # Legacy: keep only frames differing from the last retained one.
+            for image, frame_id, vector in zip(pending_images, pending_ids, vectors):
+                if last_vector is None or _cosine(last_vector, vector) < cosine_threshold:
+                    image.save(output_dir / f"{frame_id:09d}.jpg", quality=image_quality, optimize=True)
+                    retained_vectors.append(vector)
+                    retained_ids.append(frame_id)
+                    last_vector = vector
+        else:
+            # Coarse mode: keep every sampled frame (already time-diverse).
+            for image, frame_id, vector in zip(pending_images, pending_ids, vectors):
                 image.save(output_dir / f"{frame_id:09d}.jpg", quality=image_quality, optimize=True)
                 retained_vectors.append(vector)
                 retained_ids.append(frame_id)
@@ -189,10 +218,15 @@ def extract_deduplicated_keyframes(
             if not ok:
                 break
             frame_id = int(capture.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+            decoded += 1
+            # Coarse mode: only keep frames at the sampling cadence (frame 0 always).
+            if sample_interval_sec is not None and frame_id % frame_step != 0:
+                if progress_callback is not None:
+                    progress_callback(decoded, total_frames or decoded, len(retained_ids))
+                continue
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             pending_images.append(Image.fromarray(rgb))
             pending_ids.append(frame_id)
-            decoded += 1
             if progress_callback is not None:
                 progress_callback(decoded, total_frames or decoded, len(retained_ids))
             if len(pending_images) >= batch_size:
