@@ -7,13 +7,6 @@
 > Hệ thống retrieval video cho giải **AIC 2026** — hỗ trợ 3 task: **KIS**, **Q&A**, **TRAKE**.
 > Dense retrieval bằng **SigLIP2 + FAISS**, lexical bằng **BM25**, điều phối bằng **LLM cục bộ (Ollama)**.
 
-<!-- ▼▼▼ Thả ảnh UI vào docs/images/ ▼▼▼ -->
-**Query demo (KIS):**
-> A short-haired woman wearing a green shirt is looking at the painting on the wall
-
-![UI PEGASUS — Known Item Search](docs/images/UIAIC26.png)
-<!-- ▲▲▲ ▲▲▲ -->
-
 ---
 
 ## 📋 Mục lục
@@ -253,7 +246,7 @@ cat > query_kis.json <<'EOF'
 {
   "query_id": "KIS_001",
   "type": "kis",
-  "text": "người đàn ông mặc áo đỏ đang đi bộ trên đường phố"
+  "text": "A short-haired woman wearing a green shirt is looking at the painting on the wall"
 }
 EOF
 
